@@ -5,6 +5,7 @@ use futures::StreamExt;
 use iroh::EndpointId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, trace, warn};
 use tun::{AsyncDevice, Configuration, Layer};
 
 /// TUN interface for bidirectional packet routing
@@ -48,6 +49,7 @@ impl TunInterface {
         to_network_tx: mpsc::UnboundedSender<(EndpointId, Vec<u8>)>,
         from_network_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     ) -> Self {
+        info!("Creating TUN interface");
         Self {
             registry,
             to_network_tx,
@@ -68,6 +70,7 @@ impl TunInterface {
     /// - Address: `fd69:726f::1/32`
     /// - MTU: 1420 bytes (accounts for QUIC overhead)
     fn create_device() -> Result<AsyncDevice> {
+        info!("Creating TUN device (requires root/sudo)");
         let mut config = Configuration::default();
         config
             .layer(Layer::L3)
@@ -85,7 +88,7 @@ impl TunInterface {
         let device =
             tun::create_as_async(&config).context("Failed to create TUN device (are you root?)")?;
 
-        tracing::info!("TUN device created: {}", device.as_ref().tun_name()?);
+        info!("TUN device created: {}", device.as_ref().tun_name()?);
 
         Ok(device)
     }
@@ -106,23 +109,25 @@ impl TunInterface {
         let device = Self::create_device()?;
         let mut framed = device.into_framed();
 
-        tracing::info!("TUN interface running, ready to process packets");
+        info!("TUN interface running, ready to process packets");
 
         loop {
             tokio::select! {
                 // OS → Network: Read packet from TUN, send to iroh
                 Some(packet) = framed.next() => {
                     let packet = packet.context("Failed to read packet from TUN")?;
+                    trace!("Received packet from OS ({} bytes)", packet.len());
                     if let Err(e) = self.handle_os_to_network(&packet).await {
-                        tracing::warn!("Failed to handle OS→Network packet: {}", e);
+                        warn!("Failed to handle OS→Network packet: {}", e);
                     }
                 }
 
                 // Network → OS: Receive packet from iroh, write to TUN
                 Some(packet) = self.from_network_rx.recv() => {
+                    trace!("Writing packet to OS ({} bytes)", packet.len());
                     use futures::SinkExt;
                     if let Err(e) = framed.send(packet.into()).await {
-                        tracing::error!("Failed to write packet to TUN: {}", e);
+                        error!("Failed to write packet to TUN: {}", e);
                     }
                 }
             }
@@ -140,13 +145,18 @@ impl TunInterface {
     /// # Arguments
     ///
     /// * `packet` - Raw IPv6 packet from TUN device (from OS application)
-    async fn handle_os_to_network(&self, packet: &[u8]) -> Result<()> {
+    ///
+    /// # Visibility
+    ///
+    /// This method is public to allow integration testing without requiring
+    /// actual TUN device creation (which needs root privileges).
+    pub async fn handle_os_to_network(&self, packet: &[u8]) -> Result<()> {
         // Parse IPv6 header
         let ipv6_header = Ipv6Header::from_slice(packet).context("Failed to parse IPv6 header")?;
 
         let dest_addr = ipv6_header.0.destination_addr();
 
-        tracing::debug!(
+        debug!(
             "TUN received OS→Network: {} -> {}, {} bytes",
             ipv6_header.0.source_addr(),
             dest_addr,
@@ -155,7 +165,7 @@ impl TunInterface {
 
         // Lookup EndpointId for destination
         if let Some(endpoint_id) = self.registry.get_endpoint_id(&dest_addr) {
-            tracing::debug!(
+            debug!(
                 "Resolved {} -> EndpointId {}",
                 dest_addr,
                 hex::encode(endpoint_id.as_bytes())
@@ -166,7 +176,7 @@ impl TunInterface {
                 .send((endpoint_id, packet.to_vec()))
                 .context("Failed to send packet to network layer")?;
         } else {
-            tracing::warn!(
+            warn!(
                 "No EndpointId found for destination {}, dropping packet",
                 dest_addr
             );

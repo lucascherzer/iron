@@ -7,13 +7,14 @@
 197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61
 ```
 
-**DNS Domain Format**: Split across labels due to 63-char limit
+**DNS Domain Format**: Base32 encoding (no padding), 52 characters, fits in single DNS label
 ```
-197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d6.1.iron
-                                     label1 (63 chars) ↑         ↑ label2 (1 char)
+df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron
+└────────────────── 52 chars ──────────────────┘
 ```
 
-Our DNS parser concatenates labels before `.iron` to reconstruct the full hex string.
+Our DNS parser decodes the base32 label before `.iron` to reconstruct the 32-byte EndpointId.
+Base32 encoding is case-insensitive and avoids the need for multi-label DNS splitting.
 
 ---
 
@@ -23,7 +24,7 @@ Our DNS parser concatenates labels before `.iron` to reconstruct the full hex st
 
 **1. User Action**
 ```
-User in browser navigates to: http://197f6b...8d6.1.iron
+User in browser navigates to: http://df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron
 ```
 
 **2. DNS Resolution**
@@ -32,11 +33,11 @@ Browser → OS DNS resolver
          ↓
          127.0.0.1:5333 (our hickory-server DNS)
          ↓
-Query: "197f6b...8d6.1.iron" AAAA?
+Query: "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron" AAAA?
 
 DNS Handler:
-  - Concatenate labels: "197f6b...8d6" + "1" = "197f6b...8d61"
-  - Hex decode → EndpointId (32 bytes)
+  - Extract label: "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq"
+  - Base32 decode → EndpointId (32 bytes)
   - Registry: get_or_assign_ip(EndpointId)
   - Derive IPv6: fd69:726f::3d36:8b3d:fa9b:0339 (deterministic)
 
@@ -238,9 +239,9 @@ Used when iroh receives packet to verify source address.
 ## Full Round-Trip Example
 
 ```
-[Browser] http://197f6b...8d61.iron
+[Browser] http://df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron
     ↓
-[DNS] Query: 197f6b...8d61.iron → fd69:726f::3d36:...:0339
+[DNS] Query: df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron → fd69:726f::3d36:...:0339
     ↓
 [Browser] Connect to [fd69:726f::3d36:...:0339]:80
     ↓ (Socket: [fd69:726f::1]:54321 → [fd69:726f::3d36:...:0339]:80)

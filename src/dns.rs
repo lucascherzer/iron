@@ -10,6 +10,7 @@ use iroh::EndpointId;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use tracing::{debug, info, trace, warn};
 
 /// DNS resolver for .iron domains
 ///
@@ -21,6 +22,7 @@ pub struct DnsResolver {
 
 impl DnsResolver {
     pub fn new(registry: Arc<Registry>) -> Self {
+        info!("Creating DNS resolver");
         Self { registry }
     }
 
@@ -37,11 +39,13 @@ impl DnsResolver {
         let handler = IronDnsHandler::new(Arc::clone(&self.registry));
         let mut server = ServerFuture::new(handler);
 
-        tracing::info!("Starting DNS server on {}", listen_addr);
+        info!("Starting DNS server on {}", listen_addr);
         let socket = UdpSocket::bind(listen_addr).await?;
         server.register_socket(socket);
 
+        info!("DNS server listening on {}", listen_addr);
         server.block_until_done().await?;
+        info!("DNS server shutdown");
         Ok(())
     }
 }
@@ -58,47 +62,42 @@ impl IronDnsHandler {
 
     /// Parse EndpointId from a .iron domain name
     ///
-    /// Supports both base32 (no padding) and hex encoding.
-    /// For hex encoding, supports multi-label domains due to DNS 63-char label limit
-    /// (e.g., "abc...def.xyz...123.iron" -> concatenate "abc...def" + "xyz...123")
+    /// Uses base32 encoding (no padding, case-insensitive).
+    /// Base32 encoding of 32-byte EndpointId = 52 characters, fits in single DNS label.
+    ///
+    /// Example: `df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron`
     fn parse_endpoint_from_domain(&self, name: &LowerName) -> Option<EndpointId> {
         let name_str = name.to_string();
 
         // Check if ends with .iron (DNS names have trailing dot)
         if !name_str.ends_with(".iron.") {
+            trace!("Not a .iron domain: {}", name_str);
             return None;
         }
 
-        // Extract all labels before .iron.
-        // Split by '.' and take everything except the last two elements ("iron" and "")
+        // Extract label before .iron.
+        // Expected format: "<base32>.iron."
         let parts: Vec<&str> = name_str.split('.').collect();
-        if parts.len() < 3 {
-            // Need at least: label + "iron" + ""
+        if parts.len() != 3 {
+            // Must be exactly: label + "iron" + ""
+            debug!("Invalid .iron domain format (multi-label): {}", name_str);
             return None;
         }
 
-        // Concatenate all labels before ".iron." to support multi-label hex encoding
-        let encoded_id: String = parts[..parts.len() - 2].join("");
+        let encoded_id = parts[0];
 
-        // Try hex decode first (most common, lowercase)
-        if let Ok(bytes) = hex::decode(&encoded_id) {
-            if bytes.len() == 32 {
-                if let Ok(endpoint_id) = EndpointId::from_bytes(&bytes.try_into().unwrap()) {
-                    return Some(endpoint_id);
-                }
-            }
-        }
-
-        // Try base32 decode (uppercase, no padding)
+        // Base32 decode (uppercase, no padding) - case insensitive
         if let Ok(bytes) = data_encoding::BASE32_NOPAD.decode(encoded_id.to_uppercase().as_bytes())
         {
             if bytes.len() == 32 {
                 if let Ok(endpoint_id) = EndpointId::from_bytes(&bytes.try_into().unwrap()) {
+                    trace!("Parsed EndpointId from domain: {}", endpoint_id);
                     return Some(endpoint_id);
                 }
             }
         }
 
+        warn!("Failed to parse EndpointId from domain: {}", name_str);
         None
     }
 
@@ -110,9 +109,11 @@ impl IronDnsHandler {
         // 2. Lookup IPv6 from registry
         let ipv6 = self.registry.get_or_assign_ip(endpoint_id);
 
-        tracing::debug!(
+        debug!(
             "Resolved {}.iron -> {}",
-            hex::encode(endpoint_id.as_bytes()),
+            data_encoding::BASE32_NOPAD
+                .encode(endpoint_id.as_bytes())
+                .to_lowercase(),
             ipv6
         );
 
@@ -130,11 +131,11 @@ impl RequestHandler for IronDnsHandler {
         let request_info = request.request_info().expect("failed to parse request");
         let query = request_info.query;
 
-        tracing::debug!("DNS query: {} {:?}", query.name(), query.query_type());
+        trace!("DNS query: {} {:?}", query.name(), query.query_type());
 
         // Only handle .iron domains
         if !query.name().to_string().ends_with(".iron.") {
-            tracing::debug!("Not a .iron domain, returning NXDOMAIN");
+            trace!("Not a .iron domain, returning NXDOMAIN");
             let response = MessageResponseBuilder::from_message_request(request)
                 .error_msg(request.header(), ResponseCode::NXDomain);
             return response_handle.send_response(response).await.unwrap();
@@ -142,7 +143,7 @@ impl RequestHandler for IronDnsHandler {
 
         // Only handle AAAA queries
         if query.query_type() != RecordType::AAAA {
-            tracing::debug!(
+            debug!(
                 "Not an AAAA query (got {:?}), returning empty response",
                 query.query_type()
             );
@@ -175,7 +176,7 @@ impl RequestHandler for IronDnsHandler {
             response_handle.send_response(response).await.unwrap()
         } else {
             // Invalid domain format (couldn't parse EndpointId)
-            tracing::warn!("Failed to parse EndpointId from {}", query.name());
+            warn!("Failed to parse EndpointId from {}", query.name());
             let response = MessageResponseBuilder::from_message_request(request)
                 .error_msg(request.header(), ResponseCode::NXDomain);
             response_handle.send_response(response).await.unwrap()
@@ -202,23 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_endpoint_hex() {
-        let registry = Arc::new(Registry::new());
-        let handler = IronDnsHandler::new(registry);
-        let endpoint_id = test_endpoint_id(42);
-
-        // Create domain name: <hex>.iron.
-        // Hex encoding of 32 bytes = 64 chars, but DNS labels are limited to 63 chars
-        // So we split it: first 63 chars . last 1 char . iron .
-        let hex_encoded = hex::encode(endpoint_id.as_bytes());
-        let domain = format!("{}.{}.iron.", &hex_encoded[..63], &hex_encoded[63..]);
-        let name = LowerName::from_str(&domain).unwrap();
-
-        let parsed = handler.parse_endpoint_from_domain(&name);
-        assert_eq!(parsed, Some(endpoint_id));
-    }
-
-    #[test]
     fn test_parse_endpoint_base32() {
         let registry = Arc::new(Registry::new());
         let handler = IronDnsHandler::new(registry);
@@ -235,6 +219,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_endpoint_base32_uppercase() {
+        let registry = Arc::new(Registry::new());
+        let handler = IronDnsHandler::new(registry);
+        let endpoint_id = test_endpoint_id(42);
+
+        // Test uppercase (should work due to case-insensitive parsing)
+        let base32_encoded = data_encoding::BASE32_NOPAD.encode(endpoint_id.as_bytes());
+        let domain = format!("{}.iron.", base32_encoded); // uppercase
+        let name = LowerName::from_str(&domain).unwrap();
+
+        let parsed = handler.parse_endpoint_from_domain(&name);
+        assert_eq!(parsed, Some(endpoint_id));
+    }
+
+    #[test]
     fn test_parse_endpoint_invalid_domain() {
         let registry = Arc::new(Registry::new());
         let handler = IronDnsHandler::new(registry);
@@ -243,8 +242,12 @@ mod tests {
         let name = LowerName::from_str("example.com.").unwrap();
         assert!(handler.parse_endpoint_from_domain(&name).is_none());
 
-        // Invalid encoding - parse will succeed but decode will fail
-        let name = LowerName::from_str("invalid.iron.").unwrap();
+        // Invalid encoding - valid DNS label but invalid base32 characters
+        let name = LowerName::from_str("invalidbase32withlowercase.iron.").unwrap();
+        assert!(handler.parse_endpoint_from_domain(&name).is_none());
+
+        // Too many labels (not base32 format)
+        let name = LowerName::from_str("label1.label2.iron.").unwrap();
         assert!(handler.parse_endpoint_from_domain(&name).is_none());
     }
 
@@ -254,9 +257,9 @@ mod tests {
         let handler = IronDnsHandler::new(registry.clone());
         let endpoint_id = test_endpoint_id(42);
 
-        // Create domain name (split hex to handle 63-char label limit)
-        let hex_encoded = hex::encode(endpoint_id.as_bytes());
-        let domain = format!("{}.{}.iron.", &hex_encoded[..63], &hex_encoded[63..]);
+        // Create domain name with base32 encoding
+        let base32_encoded = data_encoding::BASE32_NOPAD.encode(endpoint_id.as_bytes());
+        let domain = format!("{}.iron.", base32_encoded.to_lowercase());
         let name = LowerName::from_str(&domain).unwrap();
 
         // Handle query

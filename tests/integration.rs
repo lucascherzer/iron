@@ -1,0 +1,374 @@
+//! Integration tests for iron
+//!
+//! These tests verify that all components work together correctly:
+//! - DNS resolution
+//! - Registry consistency
+//! - TUN packet handling
+//! - End-to-end packet flow (without actual network)
+
+use iroh::{EndpointId, SecretKey};
+use iron::dns::DnsResolver;
+use iron::mapping::Registry;
+use iron::tun::TunInterface;
+use std::net::Ipv6Addr;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+/// Helper to create test EndpointIds
+fn test_endpoint_id(seed: u8) -> EndpointId {
+    let secret = SecretKey::from_bytes(&[seed; 32]);
+    secret.public()
+}
+
+/// Test that Registry provides consistent mappings across all components
+#[tokio::test]
+async fn test_registry_consistency_across_components() {
+    let registry = Arc::new(Registry::new());
+
+    // Create two test endpoints
+    let endpoint_a = test_endpoint_id(1);
+    let endpoint_b = test_endpoint_id(2);
+
+    // DNS component gets IPv6 for endpoint_a
+    let ipv6_a_from_dns = registry.get_or_assign_ip(endpoint_a);
+
+    // TUN component does reverse lookup
+    let endpoint_a_from_tun = registry.get_endpoint_id(&ipv6_a_from_dns);
+    assert_eq!(endpoint_a_from_tun, Some(endpoint_a));
+
+    // Second call should return same IPv6
+    let ipv6_a_again = registry.get_or_assign_ip(endpoint_a);
+    assert_eq!(ipv6_a_from_dns, ipv6_a_again);
+
+    // Different endpoint should get different IPv6
+    let ipv6_b = registry.get_or_assign_ip(endpoint_b);
+    assert_ne!(ipv6_a_from_dns, ipv6_b);
+
+    // Verify deterministic derivation (same input = same output)
+    let registry2 = Arc::new(Registry::new());
+    let ipv6_a_from_registry2 = registry2.get_or_assign_ip(endpoint_a);
+    assert_eq!(ipv6_a_from_dns, ipv6_a_from_registry2);
+}
+
+/// Test DNS resolution with base32 encoding
+#[tokio::test]
+async fn test_dns_resolution_base32_encoding() {
+    use hickory_proto::rr::LowerName;
+    use std::str::FromStr;
+
+    let registry = Arc::new(Registry::new());
+    let endpoint_id = test_endpoint_id(42);
+
+    // Expected IPv6 from registry
+    let expected_ipv6 = registry.get_or_assign_ip(endpoint_id);
+
+    // Create DNS handler (internal to DnsResolver)
+    // We'll test via the parsing logic directly
+    let base32_encoded = data_encoding::BASE32_NOPAD.encode(endpoint_id.as_bytes());
+    assert_eq!(base32_encoded.len(), 52); // Fits in single DNS label!
+
+    let domain = format!("{}.iron.", base32_encoded.to_lowercase());
+
+    // Parse domain
+    let name = LowerName::from_str(&domain).expect("Valid domain");
+
+    // Extract label
+    let name_str = name.to_string();
+    let parts: Vec<&str> = name_str.split('.').collect();
+    assert_eq!(parts.len(), 3); // label + "iron" + ""
+    let encoded_id = parts[0];
+
+    // Verify it's the right length
+    assert_eq!(encoded_id.len(), 52);
+
+    // Decode to EndpointId
+    let bytes = data_encoding::BASE32_NOPAD
+        .decode(encoded_id.to_uppercase().as_bytes())
+        .expect("Valid base32");
+    let decoded_endpoint_id =
+        EndpointId::from_bytes(&bytes.try_into().unwrap()).expect("Valid EndpointId");
+
+    assert_eq!(decoded_endpoint_id, endpoint_id);
+
+    // Verify registry returns same IPv6
+    let ipv6_from_registry = registry.get_or_assign_ip(decoded_endpoint_id);
+    assert_eq!(ipv6_from_registry, expected_ipv6);
+}
+
+/// Test TUN packet processing (OS → Network direction)
+#[tokio::test]
+async fn test_tun_os_to_network_packet_flow() {
+    let registry = Arc::new(Registry::new());
+    let endpoint_id = test_endpoint_id(42);
+
+    // Register endpoint and get IPv6
+    let dest_ipv6 = registry.get_or_assign_ip(endpoint_id);
+
+    // Create channels
+    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+
+    // Create TUN interface
+    let tun = TunInterface::new(Arc::clone(&registry), to_network_tx, from_network_rx);
+
+    // Create minimal IPv6 packet
+    let mut packet = vec![0u8; 40];
+    packet[0] = 0x60; // Version 6
+    packet[6] = 59; // No next header
+    packet[7] = 64; // Hop limit
+
+    // Source: fd69:726f::1
+    packet[8..24].copy_from_slice(&[
+        0xfd, 0x69, 0x72, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]);
+
+    // Destination: registered endpoint's IPv6
+    packet[24..40].copy_from_slice(&dest_ipv6.octets());
+
+    // Process packet (OS → Network)
+    tun.handle_os_to_network(&packet)
+        .await
+        .expect("Valid packet");
+
+    // Verify packet was sent to network channel
+    let (recv_endpoint_id, recv_packet) = to_network_rx
+        .try_recv()
+        .expect("Packet sent to network channel");
+
+    assert_eq!(recv_endpoint_id, endpoint_id);
+    assert_eq!(recv_packet, packet);
+}
+
+/// Test two-node communication setup
+#[tokio::test]
+async fn test_two_node_setup() {
+    // Node A setup
+    let registry_a = Arc::new(Registry::new());
+    let endpoint_a = test_endpoint_id(1);
+    let ipv6_a = registry_a.get_or_assign_ip(endpoint_a);
+
+    // Node B setup
+    let registry_b = Arc::new(Registry::new());
+    let endpoint_b = test_endpoint_id(2);
+    let ipv6_b = registry_b.get_or_assign_ip(endpoint_b);
+
+    // Verify deterministic mapping (both nodes agree on IPv6 for same EndpointId)
+    let ipv6_b_from_a = registry_a.get_or_assign_ip(endpoint_b);
+    let ipv6_a_from_b = registry_b.get_or_assign_ip(endpoint_a);
+
+    assert_eq!(
+        ipv6_b, ipv6_b_from_a,
+        "Node A should derive same IPv6 for B"
+    );
+    assert_eq!(
+        ipv6_a, ipv6_a_from_b,
+        "Node B should derive same IPv6 for A"
+    );
+
+    // Verify different nodes get different addresses
+    assert_ne!(ipv6_a, ipv6_b);
+}
+
+/// Test end-to-end packet flow simulation (Node A → Node B)
+#[tokio::test]
+async fn test_simulated_packet_flow_node_a_to_b() {
+    // Setup Node A
+    let registry_a = Arc::new(Registry::new());
+    let endpoint_a = test_endpoint_id(1);
+    let _ipv6_a = registry_a.get_or_assign_ip(endpoint_a);
+
+    let (to_network_tx_a, mut to_network_rx_a) = mpsc::unbounded_channel();
+    let (_from_network_tx_a, from_network_rx_a) = mpsc::unbounded_channel();
+    let tun_a = TunInterface::new(Arc::clone(&registry_a), to_network_tx_a, from_network_rx_a);
+
+    // Setup Node B
+    let registry_b = Arc::new(Registry::new());
+    let endpoint_b = test_endpoint_id(2);
+    let ipv6_b = registry_b.get_or_assign_ip(endpoint_b);
+
+    let (_to_network_tx_b, _to_network_rx_b) = mpsc::unbounded_channel();
+    let (from_network_tx_b, from_network_rx_b) = mpsc::unbounded_channel();
+    let _tun_b = TunInterface::new(Arc::clone(&registry_b), _to_network_tx_b, from_network_rx_b);
+
+    // IMPORTANT: Node A needs to know about Node B before sending
+    // (In real scenario, this happens via DNS resolution)
+    // Node A does DNS lookup for endpoint_b, which registers it
+    let ipv6_b_from_a = registry_a.get_or_assign_ip(endpoint_b);
+    assert_eq!(ipv6_b, ipv6_b_from_a, "Deterministic mapping");
+
+    // Node A wants to send packet to Node B
+    // Simulate: OS on Node A sends packet to Node B's IPv6
+
+    // Create packet from A to B
+    let mut packet_a_to_b = vec![0u8; 40];
+    packet_a_to_b[0] = 0x60; // Version 6
+    packet_a_to_b[6] = 59; // No next header
+    packet_a_to_b[7] = 64; // Hop limit
+
+    // Source: Node A's local address
+    let ipv6_a_local = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+    packet_a_to_b[8..24].copy_from_slice(&ipv6_a_local.octets());
+
+    // Destination: Node B's IPv6
+    packet_a_to_b[24..40].copy_from_slice(&ipv6_b.octets());
+
+    // Node A's TUN processes packet (OS → Network)
+    tun_a
+        .handle_os_to_network(&packet_a_to_b)
+        .await
+        .expect("Valid packet");
+
+    // Verify packet sent to network with correct EndpointId
+    let (dest_endpoint_id, packet_bytes) =
+        to_network_rx_a.try_recv().expect("Packet sent to network");
+
+    assert_eq!(dest_endpoint_id, endpoint_b);
+    assert_eq!(packet_bytes, packet_a_to_b);
+
+    // Simulate: Iroh on Node B receives packet from Node A
+    // (In real implementation, iroh would verify source and forward to TUN)
+
+    // Node B receives packet via channel
+    from_network_tx_b
+        .send(packet_bytes)
+        .expect("Send to Node B TUN");
+
+    // In real scenario, Node B's TUN would write this to device,
+    // and OS would route to listening application
+}
+
+/// Test packet flow with invalid destination
+#[tokio::test]
+async fn test_packet_to_unregistered_destination() {
+    let registry = Arc::new(Registry::new());
+
+    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+    let tun = TunInterface::new(registry, to_network_tx, from_network_rx);
+
+    // Create packet to unknown destination
+    let mut packet = vec![0u8; 40];
+    packet[0] = 0x60; // Version 6
+    packet[6] = 59; // No next header
+    packet[7] = 64; // Hop limit
+
+    // Source: fd69:726f::1
+    packet[8..24].copy_from_slice(&[
+        0xfd, 0x69, 0x72, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]);
+
+    // Destination: unregistered IPv6
+    packet[24..40].copy_from_slice(&[
+        0xfd, 0x69, 0x72, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x99,
+        0x99,
+    ]);
+
+    // Process packet - should succeed but not send anything
+    tun.handle_os_to_network(&packet)
+        .await
+        .expect("Should handle gracefully");
+
+    // Verify no packet sent to network (unknown destination)
+    assert!(
+        to_network_rx.try_recv().is_err(),
+        "Should not send packet to unknown destination"
+    );
+}
+
+/// Test DNS resolver construction
+#[tokio::test]
+async fn test_dns_resolver_construction() {
+    let registry = Arc::new(Registry::new());
+    let _resolver = DnsResolver::new(registry);
+    // Just verify it constructs without panicking
+}
+
+/// Test IPv6 prefix consistency
+#[test]
+fn test_ipv6_prefix_consistency() {
+    let registry = Registry::new();
+    let endpoint = test_endpoint_id(42);
+
+    let ipv6 = registry.get_or_assign_ip(endpoint);
+
+    // Verify it's in our ULA range: fd69:726f::/32
+    let octets = ipv6.octets();
+    assert_eq!(octets[0], 0xfd);
+    assert_eq!(octets[1], 0x69);
+    assert_eq!(octets[2], 0x72);
+    assert_eq!(octets[3], 0x6f);
+}
+
+/// Test concurrent packet processing
+#[tokio::test]
+async fn test_concurrent_packet_processing() {
+    let registry = Arc::new(Registry::new());
+
+    // Pre-register multiple endpoints
+    let endpoints: Vec<_> = (0..10).map(|i| test_endpoint_id(i)).collect();
+    let ipv6s: Vec<_> = endpoints
+        .iter()
+        .map(|e| registry.get_or_assign_ip(*e))
+        .collect();
+
+    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+    let tun = Arc::new(TunInterface::new(
+        Arc::clone(&registry),
+        to_network_tx,
+        from_network_rx,
+    ));
+
+    // Spawn multiple tasks sending packets concurrently
+    let mut handles = vec![];
+    for (i, dest_ipv6) in ipv6s.iter().enumerate() {
+        let tun = Arc::clone(&tun);
+        let dest_ipv6 = *dest_ipv6;
+
+        let handle = tokio::spawn(async move {
+            let mut packet = vec![0u8; 40];
+            packet[0] = 0x60; // Version 6
+            packet[6] = 59;
+            packet[7] = 64;
+
+            // Source
+            packet[8..24].copy_from_slice(&[
+                0xfd, 0x69, 0x72, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x01,
+            ]);
+
+            // Destination
+            packet[24..40].copy_from_slice(&dest_ipv6.octets());
+
+            tun.handle_os_to_network(&packet).await.unwrap();
+            i
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all tasks
+    for handle in handles {
+        handle.await.expect("Task completed");
+    }
+
+    // Verify all packets were sent
+    let mut received_count = 0;
+    while to_network_rx.try_recv().is_ok() {
+        received_count += 1;
+    }
+    assert_eq!(received_count, 10);
+}
+
+/// Test that TUN interface exposes public method
+#[test]
+fn test_tun_interface_public_api() {
+    // This test ensures our public API is accessible
+    let registry = Arc::new(Registry::new());
+    let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
+    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+
+    let _tun = TunInterface::new(registry, to_network_tx, from_network_rx);
+    // Verify constructor is public and accessible
+}

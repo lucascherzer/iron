@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use iroh::EndpointId;
 use std::net::Ipv6Addr;
+use tracing::{debug, trace};
 
 /// Manages the bi-directional mapping between Iroh EndpointIds and IPv6 addresses.
 ///
@@ -27,6 +28,7 @@ pub struct Registry {
 impl Registry {
     /// Creates a new empty Registry.
     pub fn new() -> Self {
+        debug!("Creating new Registry");
         Self {
             endpoint_to_ip: DashMap::new(),
             ip_to_endpoint: DashMap::new(),
@@ -48,11 +50,13 @@ impl Registry {
     pub fn get_or_assign_ip(&self, endpoint_id: EndpointId) -> Ipv6Addr {
         // Check if we already have this mapping
         if let Some(ip) = self.endpoint_to_ip.get(&endpoint_id) {
+            trace!("Cache hit: {} -> {}", endpoint_id, *ip);
             return *ip;
         }
 
         // Derive a new IPv6 address
         let ip = self.derive_ip(&endpoint_id);
+        debug!("New mapping: {} -> {}", endpoint_id, ip);
 
         // Insert into both maps for bi-directional lookup
         self.endpoint_to_ip.insert(endpoint_id, ip);
@@ -71,7 +75,13 @@ impl Registry {
     ///
     /// The corresponding EndpointId if found, None otherwise
     pub fn get_endpoint_id(&self, ip: &Ipv6Addr) -> Option<EndpointId> {
-        self.ip_to_endpoint.get(ip).map(|entry| *entry)
+        let result = self.ip_to_endpoint.get(ip).map(|entry| *entry);
+        if result.is_some() {
+            trace!("Reverse lookup: {} -> {:?}", ip, result);
+        } else {
+            trace!("Reverse lookup miss: {}", ip);
+        }
+        result
     }
 
     /// Derives a stable IPv6 address from an EndpointId.
