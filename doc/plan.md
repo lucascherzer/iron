@@ -2,8 +2,9 @@
 
 ## Status Summary
 - ✅ Phase 1: Complete - Foundation & scaffolding established
-- 🚧 Phase 2: In Progress - Registry implementation
-- ⏳ Phase 3-6: Not Started
+- ✅ Phase 2: Complete - Registry implementation with full test coverage
+- ⏳ Phase 3: Not Started - DNS Resolver
+- ⏳ Phase 4-6: Not Started
 
 ## Phase 1: Foundation & Scaffolding ✅ COMPLETE
 - ✅ Initialize `Cargo.toml` with dependencies
@@ -21,10 +22,10 @@
 
 ---
 
-## Phase 2: Address Mapping (The Registry) 🚧 IN PROGRESS
+## Phase 2: Address Mapping (The Registry) ✅ COMPLETE
 
 ### Overview
-Implement bi-directional mapping store (`EndpointId <-> Ipv6Addr`) with deterministic IPv6 derivation.
+Implement bidirectional mapping store (`EndpointId <-> Ipv6Addr`) with deterministic IPv6 derivation.
 
 ### Design Specifications
 
@@ -53,48 +54,37 @@ fn derive_ip(endpoint_id: &EndpointId) -> Ipv6Addr {
 - Deterministic: Same EndpointId always produces same IPv6
 - Fast: O(1) derivation, no cryptographic hashing needed
 - Collision-resistant: 64-bit space, acceptable for local networks
-- Bi-directional: DashMap provides O(1) reverse lookup
+- Bidirectional: DashMap provides O(1) reverse lookup
 
 ### Implementation Tasks
 
-- [ ] **2.1** Implement `Registry::new()` with empty DashMaps
-- [ ] **2.2** Implement `derive_ip()` helper function
+- ✅ **2.1** Implement `Registry::new()` with empty DashMaps
+- ✅ **2.2** Implement `derive_ip()` helper function
   - Extract last 8 bytes from EndpointId
   - Construct IPv6 with `fd69:726f::/32` prefix
-- [ ] **2.3** Implement `get_or_assign_ip()`
+- ✅ **2.3** Implement `get_or_assign_ip()`
   - Check if EndpointId exists in cache
   - If not, derive IPv6 and insert into both maps
   - Return IPv6 address
-- [ ] **2.4** Implement `get_endpoint_id()`
+- ✅ **2.4** Implement `get_endpoint_id()`
   - Lookup IPv6 in reverse map
   - Return `Option<EndpointId>`
-- [ ] **2.5** Write unit tests following AGENTS.md pattern
-  - Test deterministic derivation (same input → same output)
-  - Test bi-directional lookup consistency
-  - Test concurrent access (DashMap thread-safety)
-  - Test collision handling (if any)
-  - Example test structure:
-    ```rust
-    #[test]
-    fn test_registry_operations() {
-        let tests = [
-            (endpoint_id_1, expected_ipv6_1),
-            (endpoint_id_2, expected_ipv6_2),
-            // ...
-        ];
-        for (endpoint_id, expected) in tests {
-            run_test_case(endpoint_id, expected);
-        }
-    }
-    ```
-- [ ] **2.6** Add documentation comments to all public methods
-- [ ] **2.7** Run `cargo fmt` before committing
+- ✅ **2.5** Write unit tests following AGENTS.md pattern
+  - 11 comprehensive tests implemented
+  - Test deterministic derivation ✅
+  - Test bidirectional lookup consistency ✅
+  - Test concurrent access (DashMap thread-safety) ✅
+  - Test with 1000+ endpoints ✅
+  - Test array pattern as per AGENTS.md ✅
+- ✅ **2.6** Add documentation comments to all public methods
+- ✅ **2.7** Run `cargo fmt` before committing
 
-**Success Criteria**:
-- All tests pass
-- `cargo test` succeeds
-- Registry can map 1000+ EndpointIds without issues
-- Forward and reverse lookups are consistent
+**Success Criteria**: ✅ ALL MET
+- ✅ All tests pass (11/11 tests passing)
+- ✅ `cargo test` succeeds
+- ✅ Registry can map 1000+ EndpointIds without issues (tested)
+- ✅ Forward and reverse lookups are consistent (tested)
+- ✅ Concurrent access safe (tested with 10 threads)
 
 ---
 
@@ -106,7 +96,7 @@ Implement DNS server using `hickory-server` to resolve `.iron` domains.
 ### Design Specifications
 
 **Query Handling**:
-- Listen on `127.0.0.1:5333` (non-standard port to avoid root)
+- Listen on `127.0.0.1:5333` (nonstandard port to avoid root)
 - Handle AAAA queries for `<endpoint_id>.iron` domains
 - Parse EndpointId from domain name
 - Use Registry to get/generate IPv6 address
