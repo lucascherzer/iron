@@ -33,6 +33,54 @@ We require two components for this to work:
   resolver in reverse, taking the IPv6 address and getting its associated iroh
   EndpointId. And sending the data off.
 
+# Packet Flow Architecture
+
+## Overview
+The TUN interface handles **bidirectional** packet flow between the OS and the iron network:
+
+### OS → Network (Outbound to Peers)
+When an OS application wants to communicate with a peer:
+
+1. **Application sends data** to destination IPv6 `fd69:726f::xxxx:xxxx:xxxx:xxxx`
+2. **OS routes packet to TUN device** (because we advertise routes for `fd69:726f::/32`)
+3. **TUN reads packet from device**
+4. **Parse IPv6 header** to extract destination address
+5. **Registry lookup**: Destination IPv6 → EndpointId
+6. **Send to iroh** via channel: `(EndpointId, packet_bytes)`
+7. **Iroh transmits** packet to peer over QUIC
+
+### Network → OS (Inbound from Peers)
+When a peer sends data to us:
+
+1. **Iroh receives packet** from peer (iroh knows sender's EndpointId)
+2. **Registry lookup**: Sender EndpointId → Source IPv6
+3. **Packet already has correct headers** (peer constructed it properly)
+4. **Send to TUN** via channel: `packet_bytes`
+5. **TUN writes packet to device**
+6. **OS routes to listening application** based on destination IPv6
+
+## Key Insight
+**We do NOT read from network hardware** - instead, we actively poll iroh's bidirectional
+endpoint for incoming packets. Iroh handles all the network complexity (NAT traversal,
+relay coordination, QUIC connections). We simply:
+- Read packets FROM the TUN device (OS wants to send)
+- Write packets TO the TUN device (peer sent to us)
+
+## Channel Architecture
+```rust
+// OS → Network
+let (to_network_tx, to_network_rx) = mpsc::unbounded_channel::<(EndpointId, Vec<u8>)>();
+
+// Network → OS  
+let (from_network_tx, from_network_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+// TUN interface
+TunInterface::new(registry, to_network_tx, from_network_rx);
+
+// Iroh integration (Phase 5)
+IronProtocol::new(registry, to_network_rx, from_network_tx);
+```
+
 # IPv6 Address Space
 
 **ULA Prefix**: `fd69:726f::/32` (iron-branded)

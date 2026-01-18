@@ -4,13 +4,35 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Core networking
 iroh = "0.95.1"
-tun = "0.8.5"
+tun = { version = "0.8.5", features = ["async"] }
+
+# Async runtime
 tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Data structures
 dashmap = "6"
+
+# DNS server
 hickory-server = "0.25"
+hickory-proto = "0.25"
+
+# Error handling
 anyhow = "1.0"
 thiserror = "2.0"
+
+# Packet parsing
 etherparse = "0.19"
+
+# Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# Encoding/decoding
+data-encoding = "2.6"
+hex = "0.4"
+
+# Async traits
+async-trait = "0.1"
