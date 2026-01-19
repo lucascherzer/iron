@@ -1,5 +1,6 @@
 use crate::mapping::Registry;
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use iroh::{Endpoint, EndpointId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -14,7 +15,7 @@ const MAX_PACKET_SIZE: usize = 1500;
 /// Iroh protocol handler for packet transport
 ///
 /// This component bridges TUN interface and iroh QUIC connections:
-/// - **Send**: Receives (EndpointId, packet) from TUN, sends via QUIC
+/// - **Send**: Receives (EndpointId, packet) from TUN, sends via QUIC with connection pooling
 /// - **Receive**: Accepts QUIC connections, forwards packets to TUN
 pub struct IronProtocol {
     registry: Arc<Registry>,
@@ -23,6 +24,8 @@ pub struct IronProtocol {
     to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Vec<u8>)>,
     /// Sends received packets to TUN
     from_network_tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// Connection pool: maps EndpointId -> Connection for reuse
+    connection_pool: Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
 }
 
 impl IronProtocol {
@@ -39,6 +42,7 @@ impl IronProtocol {
             endpoint,
             to_network_rx,
             from_network_tx,
+            connection_pool: Arc::new(DashMap::new()),
         }
     }
 
@@ -101,21 +105,59 @@ impl IronProtocol {
     }
 
     /// Sends a single packet to a peer
+    ///
+    /// Uses connection pooling to reuse existing connections when possible,
+    /// avoiding repeated handshakes.
     async fn send_packet(&self, dest: &EndpointId, packet: &[u8]) -> Result<()> {
-        trace!("Connecting to peer {}", dest);
-        // Connect to peer
-        let conn = self
-            .endpoint
-            .connect(*dest, ALPN)
-            .await
-            .context("Failed to connect to peer")?;
+        // Try to get existing connection from pool
+        let conn = if let Some(cached_conn) = self.connection_pool.get(dest) {
+            trace!("Reusing cached connection to {}", dest);
+            cached_conn.value().clone()
+        } else {
+            trace!("Creating new connection to {}", dest);
+            // Create new connection
+            let new_conn = self
+                .endpoint
+                .connect(*dest, ALPN)
+                .await
+                .context("Failed to connect to peer")?;
+
+            // Cache it for future use
+            self.connection_pool.insert(*dest, new_conn.clone());
+            debug!("Cached new connection to {}", dest);
+            new_conn
+        };
 
         trace!("Opening bi-directional stream to {}", dest);
         // Open bi-directional stream
-        let (mut send, _recv) = conn
-            .open_bi()
-            .await
-            .context("Failed to open bi-directional stream")?;
+        let stream_result = conn.open_bi().await;
+
+        let (mut send, _recv) = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                // Connection might be stale, remove from pool and retry once
+                warn!(
+                    "Failed to open stream on cached connection to {}: {}",
+                    dest, e
+                );
+                self.connection_pool.remove(dest);
+
+                // Retry with new connection
+                trace!("Retrying with new connection to {}", dest);
+                let new_conn = self
+                    .endpoint
+                    .connect(*dest, ALPN)
+                    .await
+                    .context("Failed to connect to peer on retry")?;
+
+                self.connection_pool.insert(*dest, new_conn.clone());
+
+                new_conn
+                    .open_bi()
+                    .await
+                    .context("Failed to open bi-directional stream on retry")?
+            }
+        };
 
         // Write packet data
         send.write_all(packet)
@@ -171,45 +213,76 @@ impl IronProtocol {
     }
 
     /// Handles a single connection from a peer
+    ///
+    /// This function loops to handle multiple streams on the same connection,
+    /// allowing for connection reuse and avoiding repeated handshakes.
     async fn handle_connection(
         conn: iroh::endpoint::Connection,
         sender_id: EndpointId,
         registry: Arc<Registry>,
         from_network_tx: mpsc::UnboundedSender<Vec<u8>>,
     ) -> Result<()> {
-        trace!("Accepting bi-directional stream from {}", sender_id);
-        // Accept bi-directional stream
-        let (mut send, mut recv) = conn
-            .accept_bi()
-            .await
-            .context("Failed to accept bi-directional stream")?;
-
-        // Read packet data
-        let packet = recv
-            .read_to_end(MAX_PACKET_SIZE)
-            .await
-            .context("Failed to read packet data")?;
-
         debug!(
-            "Received packet from {} ({} bytes)",
-            sender_id,
-            packet.len()
+            "Handling connection from {}, accepting streams...",
+            sender_id
         );
 
-        // Rewrite source address to sender's derived IPv6
-        // This ensures the OS sees the correct source for routing return packets
-        let packet_with_correct_source =
-            Self::rewrite_source_address(packet, &sender_id, &registry)?;
+        // Loop to handle multiple streams on this connection
+        loop {
+            trace!("Waiting for bi-directional stream from {}", sender_id);
 
-        trace!("Forwarding packet to TUN with rewritten source");
-        // Forward packet to TUN
-        from_network_tx
-            .send(packet_with_correct_source)
-            .context("Failed to send packet to TUN")?;
+            // Accept bi-directional stream
+            let stream_result = conn.accept_bi().await;
 
-        // Close send side
-        send.finish().context("Failed to finish send stream")?;
+            let (mut send, mut recv) = match stream_result {
+                Ok(s) => s,
+                Err(e) => {
+                    // Connection closed or error - this is normal when peer closes connection
+                    debug!("Connection from {} closed: {}", sender_id, e);
+                    break;
+                }
+            };
 
+            // Read packet data
+            let packet = match recv.read_to_end(MAX_PACKET_SIZE).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Failed to read packet from {}: {}", sender_id, e);
+                    continue; // Try next stream
+                }
+            };
+
+            debug!(
+                "Received packet from {} ({} bytes)",
+                sender_id,
+                packet.len()
+            );
+
+            // Rewrite source address to sender's derived IPv6
+            // This ensures the OS sees the correct source for routing return packets
+            let packet_with_correct_source =
+                match Self::rewrite_source_address(packet, &sender_id, &registry) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("Failed to rewrite source address for {}: {}", sender_id, e);
+                        continue; // Try next stream
+                    }
+                };
+
+            trace!("Forwarding packet to TUN with rewritten source");
+            // Forward packet to TUN
+            if let Err(e) = from_network_tx.send(packet_with_correct_source) {
+                error!("Failed to send packet to TUN: {}", e);
+                break; // TUN channel closed, exit
+            }
+
+            // Close send side
+            if let Err(e) = send.finish() {
+                warn!("Failed to finish send stream for {}: {}", sender_id, e);
+            }
+        }
+
+        debug!("Connection handler for {} exiting", sender_id);
         Ok(())
     }
 
