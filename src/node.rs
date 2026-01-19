@@ -46,6 +46,10 @@ impl IronNode {
 
         info!("Iroh endpoint created: {}", endpoint.id());
 
+        // Get this node's derived IPv6 address
+        let node_ipv6 = registry.get_or_assign_ip(endpoint.id());
+        info!("Node IPv6 address: {}", node_ipv6);
+
         // Create channels for packet flow
         // OS → Network: TUN sends packets to protocol handler
         let (to_network_tx, to_network_rx) = mpsc::unbounded_channel();
@@ -58,7 +62,7 @@ impl IronNode {
 
         // Initialize TUN interface
         info!("Creating TUN interface");
-        let tun = TunInterface::new(registry.clone(), to_network_tx, from_network_rx);
+        let tun = TunInterface::new(registry.clone(), node_ipv6, to_network_tx, from_network_rx);
 
         // Initialize protocol handler
         info!("Creating protocol handler");

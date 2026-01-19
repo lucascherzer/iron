@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use etherparse::Ipv6Header;
 use futures::StreamExt;
 use iroh::EndpointId;
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -21,13 +22,14 @@ use tun::{AsyncDevice, Configuration, Layer};
 ///
 /// **Network → OS (Inbound from peers):**
 /// 1. Iroh receives packet from peer (knows sender EndpointId)
-/// 2. Derive source IPv6 from EndpointId via registry
-/// 3. Rewrite packet's source IPv6 if needed
-/// 4. Send packet via `from_network_rx`
-/// 5. We write packet to TUN device
-/// 6. OS routes to listening application
+/// 2. Protocol layer rewrites source IPv6 to sender's derived IPv6
+/// 3. Send packet via `from_network_rx`
+/// 4. We write packet to TUN device
+/// 5. OS routes to listening application
 pub struct TunInterface {
     registry: Arc<Registry>,
+    /// This node's derived IPv6 address (used for TUN configuration)
+    node_ipv6: Ipv6Addr,
     /// Channel for sending packets TO network (OS → iroh)
     /// Format: (destination_endpoint_id, raw_packet_bytes)
     to_network_tx: mpsc::UnboundedSender<(EndpointId, Vec<u8>)>,
@@ -42,16 +44,19 @@ impl TunInterface {
     /// # Arguments
     ///
     /// * `registry` - Shared registry for IPv6 <-> EndpointId mapping
+    /// * `node_ipv6` - This node's derived IPv6 address
     /// * `to_network_tx` - Channel sender for packets going to iroh peers
     /// * `from_network_rx` - Channel receiver for packets coming from iroh peers
     pub fn new(
         registry: Arc<Registry>,
+        node_ipv6: Ipv6Addr,
         to_network_tx: mpsc::UnboundedSender<(EndpointId, Vec<u8>)>,
         from_network_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     ) -> Self {
-        info!("Creating TUN interface");
+        info!("Creating TUN interface with IPv6: {}", node_ipv6);
         Self {
             registry,
+            node_ipv6,
             to_network_tx,
             from_network_rx,
         }
@@ -67,9 +72,9 @@ impl TunInterface {
     /// # Configuration
     ///
     /// - IPv6 only (Layer3)
-    /// - Address: `fd69:726f::1/32`
+    /// - Address: Node's derived IPv6 with /32 prefix
     /// - MTU: 1420 bytes (accounts for QUIC overhead)
-    fn create_device() -> Result<AsyncDevice> {
+    fn create_device(&self) -> Result<AsyncDevice> {
         info!("Creating TUN device (requires root/sudo)");
         let mut config = Configuration::default();
 
@@ -111,7 +116,7 @@ impl TunInterface {
         info!("TUN device created: {}", tun_name);
 
         // Configure IPv6 address on the interface
-        match Self::configure_ipv6(&tun_name) {
+        match self.configure_ipv6(&tun_name) {
             Ok(_) => debug!("IPv6 configuration successful"),
             Err(e) => {
                 error!("IPv6 configuration failed: {:?}", e);
@@ -128,18 +133,22 @@ impl TunInterface {
     /// doesn't handle IPv6 configuration automatically on all platforms.
     ///
     /// Sets up:
-    /// - Interface IPv6 address: fd69:726f::1/32
+    /// - Interface IPv6 address: Node's derived IPv6 with /32 prefix
     /// - Route: fd69:726f::/32 → TUN interface
-    fn configure_ipv6(tun_name: &str) -> Result<()> {
-        info!("Configuring IPv6 on {}", tun_name);
+    fn configure_ipv6(&self, tun_name: &str) -> Result<()> {
+        info!(
+            "Configuring IPv6 on {} with address {}",
+            tun_name, self.node_ipv6
+        );
 
         #[cfg(target_os = "macos")]
         {
-            // Add IPv6 address: fd69:726f::1/32
+            // Add IPv6 address with /32 prefix
+            let ipv6_with_prefix = format!("{}/32", self.node_ipv6);
             let output = std::process::Command::new("ifconfig")
                 .arg(tun_name)
                 .arg("inet6")
-                .arg("fd69:726f::1/32")
+                .arg(&ipv6_with_prefix)
                 .arg("up")
                 .output()
                 .context("Failed to execute ifconfig")?;
@@ -149,7 +158,10 @@ impl TunInterface {
                 anyhow::bail!("Failed to configure IPv6 address: {}", stderr);
             }
 
-            info!("IPv6 address configured: fd69:726f::1/32 on {}", tun_name);
+            info!(
+                "IPv6 address configured: {} on {}",
+                ipv6_with_prefix, tun_name
+            );
 
             // Add route for the entire fd69:726f::/32 network
             let output = std::process::Command::new("route")
@@ -173,12 +185,13 @@ impl TunInterface {
 
         #[cfg(target_os = "linux")]
         {
-            // Add IPv6 address: fd69:726f::1/32
+            // Add IPv6 address with /32 prefix
+            let ipv6_with_prefix = format!("{}/32", self.node_ipv6);
             let output = std::process::Command::new("ip")
                 .arg("-6")
                 .arg("addr")
                 .arg("add")
-                .arg("fd69:726f::1/32")
+                .arg(&ipv6_with_prefix)
                 .arg("dev")
                 .arg(tun_name)
                 .output()
@@ -189,7 +202,10 @@ impl TunInterface {
                 anyhow::bail!("Failed to configure IPv6 address: {}", stderr);
             }
 
-            info!("IPv6 address configured: fd69:726f::1/32 on {}", tun_name);
+            info!(
+                "IPv6 address configured: {} on {}",
+                ipv6_with_prefix, tun_name
+            );
 
             // Bring the interface up
             let output = std::process::Command::new("ip")
@@ -241,7 +257,7 @@ impl TunInterface {
     /// - Packet parsing fails repeatedly
     /// - Device I/O errors occur
     pub async fn run(mut self) -> Result<()> {
-        let device = Self::create_device()?;
+        let device = self.create_device()?;
         let mut framed = device.into_framed();
 
         info!("TUN interface running, ready to process packets");
@@ -336,9 +352,11 @@ mod tests {
     #[test]
     fn test_tun_interface_new() {
         let registry = Arc::new(Registry::new());
+        let endpoint_id = test_endpoint_id(1);
+        let node_ipv6 = registry.get_or_assign_ip(endpoint_id);
         let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let _tun = TunInterface::new(registry, to_network_tx, from_network_rx);
+        let _tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
         // Just verify it constructs
     }
 
@@ -350,9 +368,17 @@ mod tests {
         // Get the IPv6 for this endpoint
         let dest_ip = registry.get_or_assign_ip(endpoint_id);
 
+        let node_endpoint_id = test_endpoint_id(1);
+        let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
+
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let tun = TunInterface::new(Arc::clone(&registry), to_network_tx, from_network_rx);
+        let tun = TunInterface::new(
+            Arc::clone(&registry),
+            node_ipv6,
+            to_network_tx,
+            from_network_rx,
+        );
 
         // Create a minimal IPv6 packet
         // IPv6 header: 40 bytes
@@ -395,9 +421,11 @@ mod tests {
     #[tokio::test]
     async fn test_handle_os_to_network_unknown_destination() {
         let registry = Arc::new(Registry::new());
+        let node_endpoint_id = test_endpoint_id(1);
+        let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let tun = TunInterface::new(registry, to_network_tx, from_network_rx);
+        let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
 
         // Create IPv6 packet with unknown destination
         let mut packet = vec![0u8; 40];
@@ -429,9 +457,11 @@ mod tests {
     #[tokio::test]
     async fn test_handle_os_to_network_invalid_packet() {
         let registry = Arc::new(Registry::new());
+        let node_endpoint_id = test_endpoint_id(1);
+        let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
         let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let tun = TunInterface::new(registry, to_network_tx, from_network_rx);
+        let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
 
         // Invalid packet (too short)
         let packet = vec![0u8; 10];

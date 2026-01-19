@@ -196,19 +196,15 @@ impl IronProtocol {
             packet.len()
         );
 
-        // Verify source address in packet matches sender
-        if let Err(e) = Self::verify_source_address(&packet, &sender_id, &registry) {
-            warn!(
-                "Source address verification failed for {}: {}",
-                sender_id, e
-            );
-            return Err(e);
-        }
+        // Rewrite source address to sender's derived IPv6
+        // This ensures the OS sees the correct source for routing return packets
+        let packet_with_correct_source =
+            Self::rewrite_source_address(packet, &sender_id, &registry)?;
 
-        trace!("Forwarding verified packet to TUN");
+        trace!("Forwarding packet to TUN with rewritten source");
         // Forward packet to TUN
         from_network_tx
-            .send(packet)
+            .send(packet_with_correct_source)
             .context("Failed to send packet to TUN")?;
 
         // Close send side
@@ -217,31 +213,41 @@ impl IronProtocol {
         Ok(())
     }
 
-    /// Verifies that the packet's source IPv6 matches the sender's EndpointId
+    /// Rewrites the packet's source IPv6 to match the sender's derived IPv6
     ///
-    /// This prevents peers from spoofing packets from other peers.
-    fn verify_source_address(
-        packet: &[u8],
+    /// Since iroh provides cryptographic authentication via EndpointId, we don't
+    /// need to verify the source address. Instead, we rewrite it to the sender's
+    /// derived IPv6 so the OS can properly route return packets.
+    fn rewrite_source_address(
+        packet: Vec<u8>,
         sender_id: &EndpointId,
         registry: &Arc<Registry>,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         use etherparse::Ipv6Header;
 
-        // Parse IPv6 header
-        let (header, _) = Ipv6Header::from_slice(packet).context("Failed to parse IPv6 header")?;
+        // Parse IPv6 header - returns (header, remaining_payload_slice)
+        let (ipv6_header, payload) =
+            Ipv6Header::from_slice(&packet).context("Failed to parse IPv6 header")?;
 
-        let packet_src = header.source_addr();
-        let expected_src = registry.get_or_assign_ip(*sender_id);
+        // Get sender's derived IPv6
+        let sender_ipv6 = registry.get_or_assign_ip(*sender_id);
 
-        if packet_src != expected_src {
-            anyhow::bail!(
-                "Source address mismatch: packet claims {} but sender is {} (expected {})",
-                packet_src,
-                sender_id,
-                expected_src
-            );
-        }
+        // Rewrite source address
+        let mut header = ipv6_header;
+        header.source = sender_ipv6.octets();
 
-        Ok(())
+        // Rebuild packet with new source
+        let mut new_packet = Vec::with_capacity(packet.len());
+        header
+            .write(&mut new_packet)
+            .context("Failed to write IPv6 header")?;
+        new_packet.extend_from_slice(payload);
+
+        trace!(
+            "Rewrote source address to {} for sender {}",
+            sender_ipv6, sender_id
+        );
+
+        Ok(new_packet)
     }
 }
