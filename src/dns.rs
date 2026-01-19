@@ -131,15 +131,17 @@ impl RequestHandler for IronDnsHandler {
         let request_info = request.request_info().expect("failed to parse request");
         let query = request_info.query;
 
-        trace!("DNS query: {} {:?}", query.name(), query.query_type());
-
         // Only handle .iron domains
+        // Return REFUSED for non-.iron domains (RFC 1035: server refuses operation for policy reasons)
+        // This tells resolvers "I don't handle this domain" vs NXDOMAIN "domain doesn't exist"
         if !query.name().to_string().ends_with(".iron.") {
-            trace!("Not a .iron domain, returning NXDOMAIN");
             let response = MessageResponseBuilder::from_message_request(request)
-                .error_msg(request.header(), ResponseCode::NXDomain);
+                .error_msg(request.header(), ResponseCode::Refused);
             return response_handle.send_response(response).await.unwrap();
         }
+
+        // Log only .iron domain queries (reduces noise from systemd-resolved fallback queries)
+        trace!("DNS query: {} {:?}", query.name(), query.query_type());
 
         // Only handle AAAA queries for .iron domains
         // For other query types (A, MX, etc.), return authoritative empty answer
