@@ -72,25 +72,160 @@ impl TunInterface {
     fn create_device() -> Result<AsyncDevice> {
         info!("Creating TUN device (requires root/sudo)");
         let mut config = Configuration::default();
+
         config
             .layer(Layer::L3)
-            .address((169, 254, 0, 1)) // Link-local IPv4 (required but unused)
+            .address((169, 254, 0, 1))
+            .netmask((255, 255, 255, 0))
             .destination((169, 254, 0, 2))
             .mtu(1420)
             .up();
 
-        #[cfg(target_os = "macos")]
-        config.tun_name("utun");
-
         #[cfg(target_os = "linux")]
-        config.tun_name("iron0");
+        config.platform_config(|platform_config| {
+            platform_config.ensure_root_privileges(true);
+        });
 
-        let device =
-            tun::create_as_async(&config).context("Failed to create TUN device (are you root?)")?;
+        debug!("TUN configuration: {:?}", config);
 
-        info!("TUN device created: {}", device.as_ref().tun_name()?);
+        let device = match tun::create_as_async(&config) {
+            Ok(dev) => {
+                debug!("TUN device creation successful");
+                dev
+            }
+            Err(e) => {
+                error!("TUN device creation failed: {:?}", e);
+                error!("Error kind: {}", e);
+                error!("Configuration was: {:?}", config);
+                anyhow::bail!("Failed to create TUN device: {} (are you root?)", e);
+            }
+        };
+
+        let tun_name = match device.as_ref().tun_name() {
+            Ok(name) => name,
+            Err(e) => {
+                error!("Failed to get TUN device name: {:?}", e);
+                anyhow::bail!("Failed to get TUN device name: {}", e);
+            }
+        };
+        info!("TUN device created: {}", tun_name);
+
+        // Configure IPv6 address on the interface
+        match Self::configure_ipv6(&tun_name) {
+            Ok(_) => debug!("IPv6 configuration successful"),
+            Err(e) => {
+                error!("IPv6 configuration failed: {:?}", e);
+                return Err(e);
+            }
+        }
 
         Ok(device)
+    }
+
+    /// Configures IPv6 address and routing on the TUN interface
+    ///
+    /// Uses system commands to add IPv6 address and route since the tun crate
+    /// doesn't handle IPv6 configuration automatically on all platforms.
+    ///
+    /// Sets up:
+    /// - Interface IPv6 address: fd69:726f::1/32
+    /// - Route: fd69:726f::/32 → TUN interface
+    fn configure_ipv6(tun_name: &str) -> Result<()> {
+        info!("Configuring IPv6 on {}", tun_name);
+
+        #[cfg(target_os = "macos")]
+        {
+            // Add IPv6 address: fd69:726f::1/32
+            let output = std::process::Command::new("ifconfig")
+                .arg(tun_name)
+                .arg("inet6")
+                .arg("fd69:726f::1/32")
+                .arg("up")
+                .output()
+                .context("Failed to execute ifconfig")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to configure IPv6 address: {}", stderr);
+            }
+
+            info!("IPv6 address configured: fd69:726f::1/32 on {}", tun_name);
+
+            // Add route for the entire fd69:726f::/32 network
+            let output = std::process::Command::new("route")
+                .arg("-n")
+                .arg("add")
+                .arg("-inet6")
+                .arg("fd69:726f::/32")
+                .arg("-interface")
+                .arg(tun_name)
+                .output()
+                .context("Failed to execute route command")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Route might already exist, just warn
+                warn!("Failed to add route (might already exist): {}", stderr);
+            } else {
+                info!("IPv6 route added: fd69:726f::/32 → {}", tun_name);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Add IPv6 address: fd69:726f::1/32
+            let output = std::process::Command::new("ip")
+                .arg("-6")
+                .arg("addr")
+                .arg("add")
+                .arg("fd69:726f::1/32")
+                .arg("dev")
+                .arg(tun_name)
+                .output()
+                .context("Failed to execute ip command")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to configure IPv6 address: {}", stderr);
+            }
+
+            info!("IPv6 address configured: fd69:726f::1/32 on {}", tun_name);
+
+            // Bring the interface up
+            let output = std::process::Command::new("ip")
+                .arg("link")
+                .arg("set")
+                .arg(tun_name)
+                .arg("up")
+                .output()
+                .context("Failed to bring interface up")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to bring interface up: {}", stderr);
+            }
+
+            // Add route for the entire fd69:726f::/32 network
+            let output = std::process::Command::new("ip")
+                .arg("-6")
+                .arg("route")
+                .arg("add")
+                .arg("fd69:726f::/32")
+                .arg("dev")
+                .arg(tun_name)
+                .output()
+                .context("Failed to add route")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Route might already exist, just warn
+                warn!("Failed to add route (might already exist): {}", stderr);
+            } else {
+                info!("IPv6 route added: fd69:726f::/32 → {}", tun_name);
+            }
+        }
+
+        Ok(())
     }
 
     /// Initializes the TUN device and starts the packet processing loop.
@@ -124,10 +259,12 @@ impl TunInterface {
 
                 // Network → OS: Receive packet from iroh, write to TUN
                 Some(packet) = self.from_network_rx.recv() => {
-                    trace!("Writing packet to OS ({} bytes)", packet.len());
+                    debug!("Received packet from network, writing to TUN ({} bytes)", packet.len());
                     use futures::SinkExt;
                     if let Err(e) = framed.send(packet.into()).await {
                         error!("Failed to write packet to TUN: {}", e);
+                    } else {
+                        debug!("Successfully wrote packet to TUN");
                     }
                 }
             }

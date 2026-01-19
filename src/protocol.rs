@@ -72,6 +72,7 @@ impl IronProtocol {
     /// Send loop: reads packets from TUN and sends them to peers via QUIC
     async fn send_loop(&mut self) -> Result<()> {
         info!("Starting send loop");
+        let self_id = self.endpoint.id();
 
         while let Some((dest_endpoint_id, packet)) = self.to_network_rx.recv().await {
             debug!(
@@ -79,6 +80,15 @@ impl IronProtocol {
                 dest_endpoint_id,
                 packet.len()
             );
+
+            // Check for loopback (sending to ourselves)
+            if dest_endpoint_id == self_id {
+                debug!("Loopback detected: cannot connect to self (P2P requires two nodes)");
+                // Note: We cannot implement proper loopback without protocol-specific
+                // packet rewriting (ICMP echo reply, TCP handshake, etc.).
+                // This is by design - iron is for peer-to-peer networking.
+                continue;
+            }
 
             if let Err(e) = self.send_packet(&dest_endpoint_id, &packet).await {
                 warn!("Failed to send packet to {}: {}", dest_endpoint_id, e);

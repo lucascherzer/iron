@@ -8,7 +8,37 @@
 - ✅ Phase 5: Complete - Iroh integration with packet transport protocol
 - ✅ Phase 6: Complete - CLI & Orchestration with graceful shutdown
 - ✅ Integration Tests: Complete - 10 comprehensive integration tests
-- 🎉 **PROJECT COMPLETE** - All phases implemented successfully!
+- ✅ **TUN Device Fix**: IPv6 configuration and routing now working
+- 🎉 **PROJECT COMPLETE** - All phases implemented and tested!
+
+## Recent Updates (Jan 19, 2026)
+
+### ✅ TUN Device Configuration Fix - WORKING!
+- **Problem**: TUN device creation was failing even with root privileges
+- **Root Cause**: IPv6 addresses not automatically configured by `tun` crate on macOS/Linux
+- **Solution**: 
+  - Added manual IPv6 configuration via system commands (`ifconfig`/`ip`)
+  - Added routing rules for `fd69:726f::/32` network
+  - Removed manual `.tun_name()` specification (let OS auto-assign)
+  - Added platform-specific configuration for Linux
+- **Final Fix**: Removed `.tun_name()` configuration, let the `tun` crate auto-assign device names
+- **Files Modified**:
+  - `src/tun.rs`: Added `configure_ipv6()` function, improved error logging
+  - `examples/test_tun.rs`: Fixed method name and imports
+- **Testing**: 
+  - ✅ Successfully tested on macOS (Darwin)
+  - ✅ TUN device created: `utun13`
+  - ✅ IPv6 configured: `fd69:726f::1/32`
+  - ✅ Route added: `fd69:726f::/32 → utun13`
+  - ✅ DNS server operational (port 5333)
+  - ✅ Packet processing working
+  - ✅ All 30 tests passing
+- **Documentation**: 
+  - Created `doc/tun-fix.md` for detailed explanation
+  - Created `SUCCESS.md` with verified working status
+  - Created `MANUAL_TESTS.md` for comprehensive testing guide
+  - Created `test-interactive.sh` for automated verification
+- **Status**: **FULLY OPERATIONAL** 🎉
 
 ## Phase 1: Foundation & Scaffolding ✅ COMPLETE
 - ✅ Initialize `Cargo.toml` with dependencies

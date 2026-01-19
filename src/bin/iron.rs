@@ -41,12 +41,28 @@ async fn main() -> Result<()> {
 
     // Display node information
     info!("Iron node initialized successfully");
-    info!("Node ID: {}", node.endpoint_id());
+    info!("");
+
+    let endpoint_id = node.endpoint_id();
+    info!("Node ID (hex):    {}", endpoint_id);
+
+    // Convert to base32 for DNS
+    let endpoint_bytes = endpoint_id.as_bytes();
+    let base32_id = data_encoding::BASE32_NOPAD
+        .encode(endpoint_bytes)
+        .to_lowercase();
+
+    info!("Node ID (base32): {}", base32_id);
+    info!("DNS name:         {}.iron", base32_id);
+    info!("");
     info!("DNS server will run on: 127.0.0.1:{}", args.dns_port);
     info!("");
     info!("To connect to this node, other peers need:");
-    info!("  - Node ID: {}", node.endpoint_id());
-    info!("  - Relay server or direct addresses");
+    info!("  - DNS name: {}.iron", base32_id);
+    info!(
+        "  - Or use dig: dig @127.0.0.1 -p {} {}.iron AAAA",
+        args.dns_port, base32_id
+    );
     info!("");
     info!("Press Ctrl-C to shutdown gracefully");
 

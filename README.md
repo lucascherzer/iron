@@ -75,6 +75,29 @@ sudo iron --log-level debug
 sudo iron --dns-port 5353
 ```
 
+When iron starts, you'll see:
+```
+Node ID (hex):    74df87cccf7e0fead1370fc39f65be3de44f5069f5db87f3b08435ccdaf3b5b9
+Node ID (base32): ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq
+DNS name:         ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq.iron
+```
+
+The **base32 Node ID** is what you use for DNS queries.
+
+### Configuring DNS Resolution
+
+To resolve `.iron` domains, you need to configure your system to query iron's DNS server.
+
+**See [DNS Setup Guide](doc/dns-setup.md) for detailed instructions.**
+
+**Quick options:**
+- **Testing:** Use `dig @127.0.0.1 -p 5333 <node-id>.iron AAAA`
+- **macOS:** `/etc/resolver/iron` method (see guide)
+- **Linux:** systemd-resolved configuration (see guide)
+- **Advanced:** dnsmasq forwarding (see guide)
+
+We provide multiple methods to accommodate different setups (VPNs, Tailscale, etc.).
+
 ### Command Line Options
 
 ```
@@ -97,60 +120,68 @@ Options:
 
 ## Connecting Two Nodes
 
-### Step 1: Start Node A
+### Prerequisites
+- Two machines with iron installed
+- Both machines can reach each other (same network, or internet with NAT traversal)
+- DNS configured on at least one machine (see [DNS Setup Guide](doc/dns-setup.md))
 
+### Step 1: Start iron on both machines
+
+**Machine A:**
 ```bash
-# On machine A
 sudo iron
+# Note the base32 Node ID displayed
 ```
 
-Output will show:
-```
-Node ID: df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq
-DNS server will run on: 127.0.0.1:5333
-```
-
-### Step 2: Get Node A's Information
-
-The Node ID is the base32-encoded EndpointId. This is what peers need to connect.
-
-### Step 3: Start Node B
-
+**Machine B:**
 ```bash
-# On machine B
 sudo iron
+# Note the base32 Node ID displayed
 ```
 
-### Step 4: Connect from Node B to Node A
+### Step 2: Configure DNS (on Machine B)
 
-First, configure your system to use iron's DNS resolver:
+Choose a DNS configuration method from [doc/dns-setup.md](doc/dns-setup.md).
 
-**macOS/Linux:**
+**Quick test without DNS configuration:**
 ```bash
-# Add to /etc/resolv.conf (or via network settings)
-nameserver 127.0.0.1
-port 5333
+# On Machine B, resolve Machine A's Node ID manually
+dig @127.0.0.1 -p 5333 <MACHINE_A_BASE32_ID>.iron AAAA
 ```
 
-Then, use the `.iron` domain to connect:
+### Step 3: Connect from Machine B to Machine A
+
+**Test DNS resolution:**
+```bash
+dig <MACHINE_A_BASE32_ID>.iron AAAA
+```
+
+**Ping Machine A:**
+```bash
+ping6 <MACHINE_A_BASE32_ID>.iron
+```
+
+**Run a service on Machine A and access it from Machine B:**
 
 ```bash
-# Node A's domain = <Node_A_ID>.iron
-ping6 df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron
+# On Machine A - start HTTP server
+python3 -m http.server 8080 --bind ::
+
+# On Machine B - access the server
+curl http://[<MACHINE_A_BASE32_ID>.iron]:8080/
 ```
 
-or
+If you see Machine A's directory listing, it works! 🎉
 
-```bash
-curl -6 http://[df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron]/
-```
+### Troubleshooting
 
-### Step 5: Verify Connection
+See [DNS Setup Guide](doc/dns-setup.md#troubleshooting) for DNS issues.
 
-You should see:
-- DNS resolution to an IPv6 address (e.g., `fd69:726f::1234:5678`)
-- Packet flow in the logs (with debug level)
-- Direct connection established via iroh
+For P2P connection issues:
+- Check both nodes show "TUN interface running" in logs
+- Verify iroh endpoint is initialized on both
+- Check firewalls allow UDP (QUIC uses UDP)
+- Watch logs with `--log-level debug` to see connection attempts
 
 ## How It Works
 
@@ -213,17 +244,21 @@ sudo iron
 
 ### DNS Not Resolving
 
-1. Verify iron is running and DNS server started:
-   ```
-   INFO DNS server listening on 127.0.0.1:5333
-   ```
+See the comprehensive [DNS Setup Guide](doc/dns-setup.md) for configuration options and troubleshooting.
 
-2. Test DNS directly:
-   ```bash
-   dig @127.0.0.1 -p 5333 <endpoint_id>.iron AAAA
-   ```
+**Quick checks:**
+1. Verify iron is running: `sudo lsof -i :5333`
+2. Test DNS directly: `dig @127.0.0.1 -p 5333 <node-id>.iron AAAA`
+3. Verify you're using the **base32** Node ID (52 chars), not hex (64 chars)
+4. Check DNS configuration method from [doc/dns-setup.md](doc/dns-setup.md)
 
-3. Check system DNS configuration points to 127.0.0.1:5333
+### "I can't ping myself" / "Loopback detected"
+
+**This is expected behavior.** iron is a P2P network - you cannot connect to yourself.
+
+Self-ping requires protocol-specific packet rewriting (ICMP echo reply, TCP handshake, etc.) which would add unnecessary complexity for a feature that doesn't test real P2P connectivity.
+
+**Solution:** Use two separate machines/nodes for testing. See [Testing Limitations](doc/testing-limitations.md) for details.
 
 ### No Connection to Peer
 
@@ -265,6 +300,13 @@ cargo test
 ```
 
 All 30 tests should pass (unit + integration tests).
+
+### Helper Scripts
+
+Located in `scripts/`:
+- `node-id-to-dns.sh` - Convert hex Node ID to base32 DNS name
+- `test-dns.sh` - Test DNS resolution interactively
+- `test-interactive.sh` - Comprehensive interactive tests
 
 ### Building Documentation
 
