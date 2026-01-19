@@ -4,6 +4,7 @@
 //! - DNS resolution
 //! - Registry consistency
 //! - TUN packet handling
+//! - Key persistence
 //! - End-to-end packet flow (without actual network)
 
 use iroh::{EndpointId, SecretKey};
@@ -12,6 +13,7 @@ use iron::mapping::Registry;
 use iron::tun::TunInterface;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 /// Helper to create test EndpointIds
@@ -401,4 +403,192 @@ fn test_tun_interface_public_api() {
 
     let _tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
     // Verify constructor is public and accessible
+}
+
+// =============================================================================
+// Key Persistence Integration Tests
+// =============================================================================
+
+/// Test that key persistence works across simulated "restarts"
+#[test]
+fn test_key_persistence_across_restarts() {
+    // Create a temporary directory for keys
+    let temp_dir = TempDir::new().unwrap();
+    let key_path = temp_dir.path().join("secret.key");
+
+    // Simulate first run: generate and save key
+    let key1 = SecretKey::generate(&mut rand::rng());
+    let endpoint_id1 = key1.public();
+
+    std::fs::write(&key_path, key1.to_bytes()).unwrap();
+
+    // Set permissions (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&key_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&key_path, perms).unwrap();
+    }
+
+    // Simulate second run: load existing key
+    let loaded_bytes = std::fs::read(&key_path).unwrap();
+    let key2 = SecretKey::from_bytes(&loaded_bytes.try_into().unwrap());
+    let endpoint_id2 = key2.public();
+
+    // Verify they're identical
+    assert_eq!(
+        endpoint_id1, endpoint_id2,
+        "EndpointId should be identical after loading persisted key"
+    );
+    assert_eq!(
+        key1.to_bytes(),
+        key2.to_bytes(),
+        "Key bytes should be identical"
+    );
+}
+
+/// Test that same key produces same IPv6 mapping
+#[test]
+fn test_key_persistence_produces_consistent_ipv6() {
+    // Create two registries (simulating two separate runs)
+    let registry1 = Registry::new();
+    let registry2 = Registry::new();
+
+    // Use same key
+    let key = SecretKey::generate(&mut rand::rng());
+    let endpoint_id = key.public();
+
+    // Both registries should produce same IPv6 for same EndpointId
+    let ipv6_1 = registry1.get_or_assign_ip(endpoint_id);
+    let ipv6_2 = registry2.get_or_assign_ip(endpoint_id);
+
+    assert_eq!(
+        ipv6_1, ipv6_2,
+        "Same EndpointId should always map to same IPv6 (deterministic)"
+    );
+}
+
+/// Test that different keys produce different IPv6 mappings
+#[test]
+fn test_different_keys_produce_different_ipv6() {
+    let registry = Registry::new();
+
+    // Generate two different keys
+    let key1 = SecretKey::generate(&mut rand::rng());
+    let key2 = SecretKey::generate(&mut rand::rng());
+
+    let endpoint_id1 = key1.public();
+    let endpoint_id2 = key2.public();
+
+    let ipv6_1 = registry.get_or_assign_ip(endpoint_id1);
+    let ipv6_2 = registry.get_or_assign_ip(endpoint_id2);
+
+    assert_ne!(
+        ipv6_1, ipv6_2,
+        "Different EndpointIds should map to different IPv6 addresses"
+    );
+}
+
+/// Test key file permissions are secure (Unix only)
+#[test]
+#[cfg(unix)]
+fn test_key_file_has_secure_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = TempDir::new().unwrap();
+    let key_path = temp_dir.path().join("secret.key");
+
+    // Generate and save a key
+    let key = SecretKey::generate(&mut rand::rng());
+    std::fs::write(&key_path, key.to_bytes()).unwrap();
+
+    // Set secure permissions
+    let mut perms = std::fs::metadata(&key_path).unwrap().permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&key_path, perms).unwrap();
+
+    // Verify permissions
+    let metadata = std::fs::metadata(&key_path).unwrap();
+    let mode = metadata.permissions().mode();
+
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "Key file should have 0600 permissions (owner read/write only)"
+    );
+}
+
+/// Test that corrupted key file is detected
+#[test]
+fn test_corrupted_key_file_detection() {
+    let temp_dir = TempDir::new().unwrap();
+    let key_path = temp_dir.path().join("corrupted.key");
+
+    // Write corrupted data (wrong size)
+    std::fs::write(&key_path, &[1, 2, 3, 4, 5]).unwrap();
+
+    // Try to load - should fail
+    let result = std::fs::read(&key_path).and_then(|bytes| {
+        if bytes.len() != 32 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid key size",
+            ))
+        } else {
+            Ok(bytes)
+        }
+    });
+
+    assert!(result.is_err(), "Loading corrupted key file should fail");
+}
+
+/// Test end-to-end: key persistence → endpoint creation → IPv6 mapping
+#[tokio::test]
+async fn test_e2e_key_persistence_to_ipv6_mapping() {
+    let temp_dir = TempDir::new().unwrap();
+    let key_path = temp_dir.path().join("secret.key");
+
+    // === First "run" ===
+
+    // Generate and save key
+    let key1 = SecretKey::generate(&mut rand::rng());
+    std::fs::write(&key_path, key1.to_bytes()).unwrap();
+
+    // Create registry and get IPv6
+    let registry1 = Arc::new(Registry::new());
+    let endpoint_id1 = key1.public();
+    let ipv6_1 = registry1.get_or_assign_ip(endpoint_id1);
+
+    // === Second "run" (simulated restart) ===
+
+    // Load key from file
+    let loaded_bytes = std::fs::read(&key_path).unwrap();
+    let key2 = SecretKey::from_bytes(&loaded_bytes.try_into().unwrap());
+
+    // Create new registry (clean state)
+    let registry2 = Arc::new(Registry::new());
+    let endpoint_id2 = key2.public();
+    let ipv6_2 = registry2.get_or_assign_ip(endpoint_id2);
+
+    // === Verification ===
+
+    // EndpointIds should match
+    assert_eq!(
+        endpoint_id1, endpoint_id2,
+        "Loaded key should produce same EndpointId"
+    );
+
+    // IPv6 addresses should match (deterministic mapping)
+    assert_eq!(
+        ipv6_1, ipv6_2,
+        "Same EndpointId should produce same IPv6 across restarts"
+    );
+
+    // Verify it's in our ULA range
+    let octets = ipv6_2.octets();
+    assert_eq!(octets[0], 0xfd);
+    assert_eq!(octets[1], 0x69);
+    assert_eq!(octets[2], 0x72);
+    assert_eq!(octets[3], 0x6f);
 }

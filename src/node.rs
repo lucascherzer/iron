@@ -1,4 +1,5 @@
 use crate::dns::DnsResolver;
+use crate::keys;
 use crate::mapping::Registry;
 use crate::protocol::IronProtocol;
 use crate::tun::TunInterface;
@@ -37,9 +38,14 @@ impl IronNode {
         // Create shared registry
         let registry = Arc::new(Registry::new());
 
-        // Initialize iroh endpoint
+        // Load or generate persistent secret key
+        info!("Loading node identity");
+        let secret_key = keys::load_or_generate_key()?;
+
+        // Initialize iroh endpoint with persistent key
         info!("Creating iroh endpoint");
         let endpoint = Endpoint::builder()
+            .secret_key(secret_key)
             .alpns(vec![crate::protocol::ALPN.to_vec()])
             .bind()
             .await?;

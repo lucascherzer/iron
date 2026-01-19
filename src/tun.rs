@@ -592,14 +592,19 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let node_endpoint_id = test_endpoint_id(1);
         let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
-        let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
 
-        // Invalid packet (too short)
+        // Invalid packet (too short, version 0)
         let packet = vec![0u8; 10];
 
+        // Should handle gracefully (non-IPv6 packets are filtered out)
         let result = tun.handle_os_to_network(&packet).await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
+
+        // Verify packet was NOT sent to network channel
+        let received = to_network_rx.try_recv();
+        assert!(received.is_err()); // Should be empty
     }
 }

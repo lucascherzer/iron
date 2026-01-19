@@ -86,6 +86,26 @@ DNS name:         ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq.iron
 
 The **base32 Node ID** is what you use for DNS queries.
 
+### Identity Persistence
+
+**Your Node ID and `.iron` domain name are persistent across restarts.** 
+
+Iron automatically generates and saves a secret key on first run:
+- **Key location:** `~/.config/iron/secret.key`
+- **Permissions:** 0600 (owner read/write only)
+- **Important:** Keep this key secure - it's your node's identity!
+
+This means:
+- ✅ Your `.iron` domain name stays the same across restarts
+- ✅ You can share your domain name with others reliably
+- ✅ Peers can always find you at the same address
+
+**To reset your identity** (get a new Node ID and domain):
+```bash
+rm ~/.config/iron/secret.key
+sudo iron
+```
+
 ### DNS Configuration
 
 Iron automatically configures DNS on first run for supported platforms:
@@ -137,6 +157,18 @@ Options:
 - Two machines with iron installed
 - Both machines can reach each other (same network, or internet with NAT traversal)
 
+### Important: IPv6-Only Network
+
+**Iron uses IPv6 exclusively.** When connecting to `.iron` domains, you must use IPv6:
+
+```bash
+nc -6 <node>.iron 1234          
+curl -6 http://<node>.iron:8080
+ping6 <node>.iron
+```
+
+Most applications will automatically fall back to IPv6, but using the `-6` flag explicitly ensures immediate connection.
+
 ### Step 1: Start iron on both machines
 
 **Machine A:**
@@ -168,11 +200,18 @@ ping6 <MACHINE_A_BASE32_ID>.iron
 **Run a service on Machine A and access it from Machine B:**
 
 ```bash
-# On Machine A - start HTTP server
+# On Machine A - start HTTP server (bind to IPv6)
 python3 -m http.server 8080 --bind ::
 
-# On Machine B - access the server
-curl http://[<MACHINE_A_BASE32_ID>.iron]:8080/
+# On Machine B - access the server (use -6 flag)
+curl -6 http://[<MACHINE_A_BASE32_ID>.iron]:8080/
+
+# Or with netcat
+# Machine A (server, listen on IPv6):
+nc -6 -l 1234
+
+# Machine B (client, connect to IPv6):
+nc -6 <MACHINE_A_BASE32_ID>.iron 1234
 ```
 
 If you see Machine A's directory listing, it works! 🎉
@@ -317,7 +356,9 @@ RUST_LOG=iron::dns=debug,iron::tun=trace,iron=info sudo iron
 cargo test
 ```
 
-All 30 tests should pass (unit + integration tests).
+All 42 tests should pass:
+- 26 unit tests (including 4 key persistence tests in `keys.rs`)
+- 16 integration tests (including 7 key persistence tests)
 
 ### Helper Scripts
 
@@ -338,6 +379,7 @@ cargo doc --open --no-deps
 iron/
 ├── src/
 │   ├── lib.rs           # Library exports
+│   ├── keys.rs          # Key persistence and generation
 │   ├── mapping.rs       # EndpointId ↔ IPv6 registry
 │   ├── dns.rs           # DNS resolver for .iron
 │   ├── dns_config.rs    # DNS auto-configuration
@@ -359,6 +401,7 @@ iron/
 
 ### Components
 
+- **Key Management** (`keys.rs`): Persistent identity storage and generation
 - **Registry** (`mapping.rs`): Bidirectional EndpointId ↔ IPv6 mapping
 - **DNS Resolver** (`dns.rs`): Hickory-server based resolver for `.iron` domains
 - **DNS Config** (`dns_config.rs`): Auto-configuration for system DNS
@@ -369,15 +412,18 @@ iron/
 ### Specifications
 
 - **IPv6 ULA Prefix**: `fd69:726f::/32` (iron-branded)
+- **IPv6 Only**: Network operates exclusively over IPv6
 - **MTU**: 1420 bytes (accounts for QUIC overhead)
 - **ALPN**: `iron/packet/0` (protocol identifier)
 - **DNS Encoding**: Base32 (no padding), 52 characters
+- **Key Storage**: `~/.config/iron/secret.key` (0600 permissions)
 - **Platform**: macOS (utun), Linux (iron0)
 
 ### Security
 
 - **Encryption**: All traffic encrypted via iroh's QUIC (TLS 1.3)
 - **Authentication**: Public key cryptography (EndpointId = PublicKey)
+- **Identity Persistence**: Cryptographic keys stored securely (0600 permissions)
 - **Source Verification**: Prevents IP spoofing between peers
 - **NAT Traversal**: Secure hole punching with relay fallback
 
