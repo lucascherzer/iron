@@ -25,11 +25,7 @@ struct Cli {
     #[arg(long, default_value = "5333", global = true)]
     dns_port: u16,
 
-    /// Setup DNS configuration for .iron domains (one-time setup)
-    #[arg(long)]
-    setup_dns: bool,
-
-    /// Remove DNS configuration for .iron domains
+    /// Remove DNS configuration for .iron domains (manual cleanup)
     #[arg(long)]
     cleanup_dns: bool,
 }
@@ -199,11 +195,7 @@ async fn main() -> Result<()> {
         init_tracing(&cli.log_level)?;
     }
 
-    // Handle DNS setup/cleanup flags (for backward compatibility)
-    if cli.setup_dns {
-        return dns_config::setup_dns();
-    }
-
+    // Handle DNS cleanup flag (for manual cleanup)
     if cli.cleanup_dns {
         return dns_config::cleanup_dns();
     }
@@ -283,8 +275,8 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     #[cfg(unix)]
     fix_key_directory_ownership()?;
 
-    // Check if DNS is configured, offer to set it up if not
-    check_and_setup_dns_if_needed()?;
+    // Setup DNS configuration automatically
+    setup_dns_for_daemon()?;
 
     // Initialize and start iron node
     info!("Initializing iron node...");
@@ -317,7 +309,7 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     info!("");
     info!("Press Ctrl-C to shutdown gracefully");
 
-    // Setup graceful shutdown on Ctrl-C
+    // Setup graceful shutdown on Ctrl-C and SIGTERM
     let shutdown_result = tokio::select! {
         result = node.start() => {
             result
@@ -328,7 +320,35 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
             info!("Shutting down gracefully...");
             Ok(())
         }
+        _ = async {
+            #[cfg(unix)]
+            {
+                let mut sigterm = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate()
+                ).expect("Failed to setup SIGTERM handler");
+                sigterm.recv().await
+            }
+            #[cfg(not(unix))]
+            {
+                // On non-Unix, just wait forever (only Ctrl-C will trigger)
+                std::future::pending::<()>().await
+            }
+        } => {
+            info!("");
+            info!("Received shutdown signal (SIGTERM)");
+            info!("Shutting down gracefully...");
+            Ok(())
+        }
     };
+
+    // Cleanup DNS configuration on shutdown
+    info!("Cleaning up DNS configuration...");
+    if let Err(e) = dns_config::cleanup_dns() {
+        error!("Failed to cleanup DNS: {}", e);
+        error!("You may need to manually cleanup with: sudo iron --cleanup-dns");
+    } else {
+        info!("✓ DNS configuration removed");
+    }
 
     match shutdown_result {
         Ok(_) => {
@@ -342,39 +362,35 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     }
 }
 
-/// Check if DNS is configured and offer to set it up if not
-fn check_and_setup_dns_if_needed() -> Result<()> {
+/// Setup DNS configuration for the daemon
+/// Auto-configures DNS on supported platforms
+fn setup_dns_for_daemon() -> Result<()> {
     if dns_config::is_dns_configured() {
+        info!("DNS already configured for .iron domains");
         return Ok(());
     }
 
-    // DNS not configured - offer to set it up
-    println!("\n⚠️  DNS not configured for .iron domains");
-    println!("\nWithout DNS configuration, you must use IP addresses directly.");
-    println!("Configure DNS to use domain names like: <peer-id>.iron\n");
+    // DNS not configured - set it up automatically
+    info!("Setting up DNS for .iron domains...");
 
     match dns_config::detect_platform() {
         dns_config::Platform::MacOS | dns_config::Platform::LinuxSystemd => {
-            println!("Setting up DNS automatically...");
-            println!("(This will only affect .iron domains, all other DNS stays the same)\n");
-
             match dns_config::setup_dns() {
                 Ok(_) => {
-                    println!("\nContinuing with iron startup...\n");
+                    info!("✓ DNS configured successfully");
                     Ok(())
                 }
                 Err(e) => {
                     error!("Failed to setup DNS: {}", e);
-                    println!("\n⚠️  DNS setup failed, but iron will continue running.");
-                    println!("You can setup DNS manually later with: sudo iron --setup-dns\n");
+                    info!("⚠️  DNS setup failed, but iron will continue running.");
+                    info!("You can manually cleanup later with: sudo iron --cleanup-dns");
                     Ok(())
                 }
             }
         }
         dns_config::Platform::LinuxOther => {
-            println!("Automatic DNS setup not available for your system.");
-            println!("See doc/dns-setup.md for manual configuration.\n");
-            println!("Continuing with iron startup...\n");
+            info!("⚠️  Automatic DNS setup not available for your system.");
+            info!("Please configure DNS manually to resolve .iron domains");
             Ok(())
         }
     }
