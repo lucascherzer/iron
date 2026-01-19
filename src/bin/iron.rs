@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use iron::IronNode;
+use iron::dns_config;
 use tracing::{error, info};
 
 /// iron - P2P network interface based on iroh
@@ -18,6 +19,14 @@ struct Args {
     /// DNS server port (default: 5333)
     #[arg(long, default_value = "5333")]
     dns_port: u16,
+
+    /// Setup DNS configuration for .iron domains (one-time setup)
+    #[arg(long)]
+    setup_dns: bool,
+
+    /// Remove DNS configuration for .iron domains
+    #[arg(long)]
+    cleanup_dns: bool,
 }
 
 #[tokio::main]
@@ -28,12 +37,24 @@ async fn main() -> Result<()> {
     // Initialize tracing subscriber
     init_tracing(&args.log_level)?;
 
+    // Handle DNS setup/cleanup commands
+    if args.setup_dns {
+        return dns_config::setup_dns();
+    }
+
+    if args.cleanup_dns {
+        return dns_config::cleanup_dns();
+    }
+
     // Display banner
     print_banner(&args);
 
     // Check if running as root (required for TUN device)
     #[cfg(unix)]
     check_root();
+
+    // Check if DNS is configured, offer to set it up if not
+    check_and_setup_dns_if_needed()?;
 
     // Initialize and start iron node
     info!("Initializing iron node...");
@@ -87,6 +108,44 @@ async fn main() -> Result<()> {
         Err(e) => {
             error!("Iron node encountered an error: {}", e);
             Err(e)
+        }
+    }
+}
+
+/// Check if DNS is configured and offer to set it up if not
+fn check_and_setup_dns_if_needed() -> Result<()> {
+    if dns_config::is_dns_configured() {
+        return Ok(());
+    }
+
+    // DNS not configured - offer to set it up
+    println!("\n⚠️  DNS not configured for .iron domains");
+    println!("\nWithout DNS configuration, you must use IP addresses directly.");
+    println!("Configure DNS to use domain names like: <peer-id>.iron\n");
+
+    match dns_config::detect_platform() {
+        dns_config::Platform::MacOS | dns_config::Platform::LinuxSystemd => {
+            println!("Setting up DNS automatically...");
+            println!("(This will only affect .iron domains, all other DNS stays the same)\n");
+
+            match dns_config::setup_dns() {
+                Ok(_) => {
+                    println!("\nContinuing with iron startup...\n");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("Failed to setup DNS: {}", e);
+                    println!("\n⚠️  DNS setup failed, but iron will continue running.");
+                    println!("You can setup DNS manually later with: sudo iron --setup-dns\n");
+                    Ok(())
+                }
+            }
+        }
+        dns_config::Platform::LinuxOther => {
+            println!("Automatic DNS setup not available for your system.");
+            println!("See doc/dns-setup.md for manual configuration.\n");
+            println!("Continuing with iron startup...\n");
+            Ok(())
         }
     }
 }

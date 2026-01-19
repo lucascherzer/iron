@@ -65,6 +65,8 @@ The binary will be at `target/release/iron`.
 sudo iron
 ```
 
+On first run, iron will automatically configure DNS for `.iron` domains (macOS and Linux with systemd-resolved only). This configuration only affects `.iron` domains - all other DNS resolution remains unchanged.
+
 **With custom log level:**
 ```bash
 sudo iron --log-level debug
@@ -84,19 +86,28 @@ DNS name:         ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq.iron
 
 The **base32 Node ID** is what you use for DNS queries.
 
-### Configuring DNS Resolution
+### DNS Configuration
 
-To resolve `.iron` domains, you need to configure your system to query iron's DNS server.
+Iron automatically configures DNS on first run for supported platforms:
+- ✅ **macOS**: Creates `/etc/resolver/iron` 
+- ✅ **Linux with systemd-resolved**: Creates `/etc/systemd/resolved.conf.d/iron.conf`
+- ⚠️ **Other Linux**: See [DNS Setup Guide](doc/dns-setup.md) for manual configuration
 
-**See [DNS Setup Guide](doc/dns-setup.md) for detailed instructions.**
+**Manual DNS commands:**
+```bash
+# Setup DNS (one-time, auto-runs on first start)
+sudo iron --setup-dns
 
-**Quick options:**
-- **Testing:** Use `dig @127.0.0.1 -p 5333 <node-id>.iron AAAA`
-- **macOS:** `/etc/resolver/iron` method (see guide)
-- **Linux:** systemd-resolved configuration (see guide)
-- **Advanced:** dnsmasq forwarding (see guide)
+# Remove DNS configuration
+sudo iron --cleanup-dns
+```
 
-We provide multiple methods to accommodate different setups (VPNs, Tailscale, etc.).
+**What this does:**
+- Routes **only** `.iron` domains to iron's DNS server (127.0.0.1:5333)
+- All other domains (google.com, github.com, etc.) use your normal DNS
+- **Works alongside Tailscale, VPNs, and other DNS systems**
+
+**For advanced configuration or troubleshooting**, see [DNS Setup Guide](doc/dns-setup.md).
 
 ### Command Line Options
 
@@ -107,6 +118,8 @@ Options:
   -l, --log-level <LOG_LEVEL>  Set the log level [default: info]
                                (trace, debug, info, warn, error)
       --dns-port <DNS_PORT>    DNS server port [default: 5333]
+      --setup-dns              Setup DNS configuration for .iron domains
+      --cleanup-dns            Remove DNS configuration
   -h, --help                   Print help
   -V, --version                Print version
 ```
@@ -123,33 +136,24 @@ Options:
 ### Prerequisites
 - Two machines with iron installed
 - Both machines can reach each other (same network, or internet with NAT traversal)
-- DNS configured on at least one machine (see [DNS Setup Guide](doc/dns-setup.md))
 
 ### Step 1: Start iron on both machines
 
 **Machine A:**
 ```bash
 sudo iron
+# DNS configured automatically on first run
 # Note the base32 Node ID displayed
 ```
 
 **Machine B:**
 ```bash
 sudo iron
+# DNS configured automatically on first run
 # Note the base32 Node ID displayed
 ```
 
-### Step 2: Configure DNS (on Machine B)
-
-Choose a DNS configuration method from [doc/dns-setup.md](doc/dns-setup.md).
-
-**Quick test without DNS configuration:**
-```bash
-# On Machine B, resolve Machine A's Node ID manually
-dig @127.0.0.1 -p 5333 <MACHINE_A_BASE32_ID>.iron AAAA
-```
-
-### Step 3: Connect from Machine B to Machine A
+### Step 2: Test connectivity from Machine B to Machine A
 
 **Test DNS resolution:**
 ```bash
@@ -244,13 +248,27 @@ sudo iron
 
 ### DNS Not Resolving
 
-See the comprehensive [DNS Setup Guide](doc/dns-setup.md) for configuration options and troubleshooting.
+Iron automatically configures DNS on first run for macOS and Linux with systemd-resolved.
 
-**Quick checks:**
-1. Verify iron is running: `sudo lsof -i :5333`
-2. Test DNS directly: `dig @127.0.0.1 -p 5333 <node-id>.iron AAAA`
-3. Verify you're using the **base32** Node ID (52 chars), not hex (64 chars)
-4. Check DNS configuration method from [doc/dns-setup.md](doc/dns-setup.md)
+**If DNS is not working:**
+
+1. Verify iron configured DNS:
+   - **macOS**: Check if `/etc/resolver/iron` exists
+   - **Linux**: Check if `/etc/systemd/resolved.conf.d/iron.conf` exists
+
+2. Manually setup DNS if needed:
+   ```bash
+   sudo iron --setup-dns
+   ```
+
+3. Test DNS directly:
+   ```bash
+   dig @127.0.0.1 -p 5333 <node-id>.iron AAAA
+   ```
+
+4. Verify you're using the **base32** Node ID (52 chars), not hex (64 chars)
+
+5. For advanced configuration, see [DNS Setup Guide](doc/dns-setup.md)
 
 ### "I can't ping myself" / "Loopback detected"
 
@@ -322,6 +340,7 @@ iron/
 │   ├── lib.rs           # Library exports
 │   ├── mapping.rs       # EndpointId ↔ IPv6 registry
 │   ├── dns.rs           # DNS resolver for .iron
+│   ├── dns_config.rs    # DNS auto-configuration
 │   ├── tun.rs           # TUN interface packet handling
 │   ├── protocol.rs      # Iroh QUIC packet transport
 │   ├── node.rs          # Component orchestration
@@ -342,8 +361,9 @@ iron/
 
 - **Registry** (`mapping.rs`): Bidirectional EndpointId ↔ IPv6 mapping
 - **DNS Resolver** (`dns.rs`): Hickory-server based resolver for `.iron` domains
+- **DNS Config** (`dns_config.rs`): Auto-configuration for system DNS
 - **TUN Interface** (`tun.rs`): Virtual network device for packet interception
-- **Protocol Handler** (`protocol.rs`): Iroh QUIC transport for packets
+- **Protocol Handler** (`protocol.rs`): Iroh QUIC transport with connection pooling
 - **Orchestrator** (`node.rs`): Component lifecycle management
 
 ### Specifications
