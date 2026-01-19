@@ -87,9 +87,10 @@ fn convert_from_base32(base32: &str) -> Result<Formats> {
         ));
     }
 
-    // Convert to EndpointId
-    let endpoint_id =
-        EndpointId::from_bytes(&bytes.try_into().unwrap()).context("Invalid EndpointId bytes")?;
+    // Convert to EndpointId - safe because we validated length
+    let mut byte_array = [0u8; 32];
+    byte_array.copy_from_slice(&bytes);
+    let endpoint_id = EndpointId::from_bytes(&byte_array).context("Invalid EndpointId bytes")?;
 
     // Derive IPv6
     let ipv6 = iron::mapping::Registry::derive_ip(endpoint_id);
@@ -110,9 +111,10 @@ fn convert_from_hex(hex_str: &str) -> Result<Formats> {
         return Err(anyhow!("Hex decoded to {} bytes, expected 32", bytes.len()));
     }
 
-    // Convert to EndpointId
-    let endpoint_id =
-        EndpointId::from_bytes(&bytes.try_into().unwrap()).context("Invalid EndpointId bytes")?;
+    // Convert to EndpointId - safe because we validated length
+    let mut byte_array = [0u8; 32];
+    byte_array.copy_from_slice(&bytes);
+    let endpoint_id = EndpointId::from_bytes(&byte_array).context("Invalid EndpointId bytes")?;
 
     // Encode as base32
     let base32 = data_encoding::BASE32_NOPAD

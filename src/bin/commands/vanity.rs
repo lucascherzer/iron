@@ -142,10 +142,11 @@ pub fn run(
         Err(_) => {
             // All threads finished without finding a match
             if !quiet {
-                println!(
-                    "\r\n✗ No match found within {} attempts",
-                    max_attempts.unwrap()
-                );
+                if let Some(max) = max_attempts {
+                    println!("\r\n✗ No match found within {} attempts", max);
+                } else {
+                    println!("\r\n✗ No match found");
+                }
             }
             return Err(anyhow!("No vanity address found"));
         }
@@ -230,7 +231,10 @@ pub fn run(
             }
 
             // Try to save the key
-            match save_key_to_file(&result.secret_key, key_path.to_str().unwrap()) {
+            let key_path_str = key_path
+                .to_str()
+                .ok_or_else(|| anyhow!("Key path contains invalid UTF-8"))?;
+            match save_key_to_file(&result.secret_key, key_path_str) {
                 Ok(_) => {
                     if !quiet {
                         println!("✓ Key saved to: {}", key_path.display());

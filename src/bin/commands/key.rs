@@ -69,8 +69,9 @@ pub fn import(file: String, save: bool) -> Result<()> {
         anyhow::bail!("Invalid key length: {} bytes (expected 32)", bytes.len());
     }
 
-    // Validate it's a valid secret key
-    let bytes_array: [u8; 32] = bytes.clone().try_into().unwrap();
+    // Validate it's a valid secret key - safe because we validated length
+    let mut bytes_array = [0u8; 32];
+    bytes_array.copy_from_slice(&bytes);
     let secret_key = SecretKey::from_bytes(&bytes_array);
     let endpoint_id = secret_key.public();
 
@@ -212,7 +213,10 @@ fn load_key_from_file(path: &PathBuf) -> Result<SecretKey> {
         anyhow::bail!("Invalid key file: expected 32 bytes, got {}", bytes.len());
     }
 
-    Ok(SecretKey::from_bytes(&bytes.try_into().unwrap()))
+    // Safe because we validated length
+    let mut byte_array = [0u8; 32];
+    byte_array.copy_from_slice(&bytes);
+    Ok(SecretKey::from_bytes(&byte_array))
 }
 
 fn save_key_bytes(path: &PathBuf, bytes: &[u8]) -> Result<()> {

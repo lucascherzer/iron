@@ -90,7 +90,11 @@ impl IronDnsHandler {
         if let Ok(bytes) = data_encoding::BASE32_NOPAD.decode(encoded_id.to_uppercase().as_bytes())
         {
             if bytes.len() == 32 {
-                if let Ok(endpoint_id) = EndpointId::from_bytes(&bytes.try_into().unwrap()) {
+                // Convert to [u8; 32] - safe because we checked length
+                let mut byte_array = [0u8; 32];
+                byte_array.copy_from_slice(&bytes);
+
+                if let Ok(endpoint_id) = EndpointId::from_bytes(&byte_array) {
                     trace!("Parsed EndpointId from domain: {}", endpoint_id);
                     return Some(endpoint_id);
                 }
@@ -128,7 +132,21 @@ impl RequestHandler for IronDnsHandler {
         request: &Request,
         mut response_handle: R,
     ) -> ResponseInfo {
-        let request_info = request.request_info().expect("failed to parse request");
+        let request_info = match request.request_info() {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("Failed to parse DNS request: {}", e);
+                let response = MessageResponseBuilder::from_message_request(request)
+                    .error_msg(request.header(), ResponseCode::FormErr);
+                return match response_handle.send_response(response).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        warn!("Failed to send error response: {}", e);
+                        ResponseInfo::from(request.header().clone())
+                    }
+                };
+            }
+        };
         let query = request_info.query;
 
         // Only handle .iron domains
@@ -137,7 +155,13 @@ impl RequestHandler for IronDnsHandler {
         if !query.name().to_string().ends_with(".iron.") {
             let response = MessageResponseBuilder::from_message_request(request)
                 .error_msg(request.header(), ResponseCode::Refused);
-            return response_handle.send_response(response).await.unwrap();
+            return match response_handle.send_response(response).await {
+                Ok(info) => info,
+                Err(e) => {
+                    warn!("Failed to send REFUSED response: {}", e);
+                    ResponseInfo::from(request.header().clone())
+                }
+            };
         }
 
         // Log only .iron domain queries (reduces noise from systemd-resolved fallback queries)
@@ -167,7 +191,13 @@ impl RequestHandler for IronDnsHandler {
                 &[],
                 &[],
             );
-            return response_handle.send_response(response).await.unwrap();
+            return match response_handle.send_response(response).await {
+                Ok(info) => info,
+                Err(e) => {
+                    warn!("Failed to send empty AAAA response: {}", e);
+                    ResponseInfo::from(request.header().clone())
+                }
+            };
         }
 
         // Handle AAAA query
@@ -191,13 +221,25 @@ impl RequestHandler for IronDnsHandler {
                 &[],
             );
 
-            response_handle.send_response(response).await.unwrap()
+            match response_handle.send_response(response).await {
+                Ok(info) => info,
+                Err(e) => {
+                    warn!("Failed to send AAAA response for {}: {}", query.name(), e);
+                    ResponseInfo::from(request.header().clone())
+                }
+            }
         } else {
             // Invalid domain format (couldn't parse EndpointId)
             warn!("Failed to parse EndpointId from {}", query.name());
             let response = MessageResponseBuilder::from_message_request(request)
                 .error_msg(request.header(), ResponseCode::NXDomain);
-            response_handle.send_response(response).await.unwrap()
+            match response_handle.send_response(response).await {
+                Ok(info) => info,
+                Err(e) => {
+                    warn!("Failed to send NXDOMAIN response: {}", e);
+                    ResponseInfo::from(request.header().clone())
+                }
+            }
         }
     }
 }

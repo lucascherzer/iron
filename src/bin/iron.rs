@@ -323,10 +323,16 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
         _ = async {
             #[cfg(unix)]
             {
-                let mut sigterm = tokio::signal::unix::signal(
+                match tokio::signal::unix::signal(
                     tokio::signal::unix::SignalKind::terminate()
-                ).expect("Failed to setup SIGTERM handler");
-                sigterm.recv().await
+                ) {
+                    Ok(mut sigterm) => sigterm.recv().await,
+                    Err(e) => {
+                        eprintln!("Warning: Failed to setup SIGTERM handler: {}", e);
+                        eprintln!("SIGTERM signals will not be handled (Ctrl-C will still work)");
+                        std::future::pending::<Option<()>>().await
+                    }
+                }
             }
             #[cfg(not(unix))]
             {

@@ -70,8 +70,10 @@ pub async fn run(
 
     let ttl = answers[0].ttl();
 
-    // Parse Node ID from domain
-    let base32_part = domain.strip_suffix(".iron").unwrap();
+    // Parse Node ID from domain (already validated to end with .iron)
+    let base32_part = domain
+        .strip_suffix(".iron")
+        .context("Domain should end with .iron (already validated)")?;
     let node_id_hex = if let Ok(bytes) =
         data_encoding::BASE32_NOPAD.decode(base32_part.to_uppercase().as_bytes())
     {
