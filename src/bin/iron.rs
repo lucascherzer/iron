@@ -1,8 +1,10 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use iron::IronNode;
 use iron::dns_config;
 use tracing::{error, info};
+
+mod commands;
 
 /// iron - P2P network interface based on iroh
 ///
@@ -11,13 +13,16 @@ use tracing::{error, info};
 #[derive(Parser, Debug)]
 #[command(name = "iron")]
 #[command(version, about, long_about = None)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Set the log level (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info")]
+    #[arg(short, long, default_value = "info", global = true)]
     log_level: String,
 
     /// DNS server port (default: 5333)
-    #[arg(long, default_value = "5333")]
+    #[arg(long, default_value = "5333", global = true)]
     dns_port: u16,
 
     /// Setup DNS configuration for .iron domains (one-time setup)
@@ -29,29 +34,254 @@ struct Args {
     cleanup_dns: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Convert between node ID formats (hex, base32, .iron domain, IPv6)
+    Convert {
+        /// Value to convert (auto-detects format)
+        value: String,
+
+        /// Output format: hex, base32, iron, ipv6
+        #[arg(long)]
+        to: Option<String>,
+    },
+
+    /// Show information about your node
+    #[command(name = "self")]
+    Self_ {
+        /// Output format
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<String>,
+
+        /// Show only hex Node ID
+        #[arg(long)]
+        hex: bool,
+
+        /// Show only base32 Node ID
+        #[arg(long)]
+        base32: bool,
+
+        /// Show only .iron domain
+        #[arg(long)]
+        domain: bool,
+
+        /// Show only IPv6 address
+        #[arg(long)]
+        ipv6: bool,
+
+        /// Check if key exists (exit code 0 if exists, 1 otherwise)
+        #[arg(long)]
+        exists: bool,
+    },
+
+    /// Generate vanity address with desired prefix
+    Vanity {
+        /// Desired prefix (case-insensitive, base32 alphabet)
+        prefix: String,
+
+        /// Number of threads to use (default: number of CPUs)
+        #[arg(long)]
+        threads: Option<usize>,
+
+        /// Maximum attempts before giving up
+        #[arg(long)]
+        max_attempts: Option<u64>,
+
+        /// Save the generated key as default
+        #[arg(long)]
+        save: bool,
+
+        /// Output file path
+        #[arg(long)]
+        output: Option<String>,
+
+        /// Only output the result, no progress
+        #[arg(long)]
+        quiet: bool,
+    },
+
+    /// Key management utilities
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
+
+    /// Test DNS resolution
+    Resolve {
+        /// Domain to resolve
+        domain: String,
+
+        /// DNS server address
+        #[arg(long, default_value = "127.0.0.1:5333")]
+        server: String,
+
+        /// Query timeout in seconds
+        #[arg(long, default_value = "5")]
+        timeout: u64,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum KeyCommand {
+    /// Show key information
+    Info {
+        /// Path to key file
+        #[arg(long)]
+        path: Option<String>,
+    },
+
+    /// Export key to file
+    Export {
+        /// Output format: hex, base64
+        #[arg(long, default_value = "hex")]
+        format: String,
+
+        /// Output file path
+        #[arg(long)]
+        output: Option<String>,
+    },
+
+    /// Import key from file
+    Import {
+        /// Input file path
+        file: String,
+
+        /// Save as default key
+        #[arg(long)]
+        save: bool,
+    },
+
+    /// Generate new random key
+    Generate {
+        /// Save as default key
+        #[arg(long)]
+        save: bool,
+
+        /// Force overwrite existing key
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Validate key file
+    Validate {
+        /// Path to key file
+        #[arg(long)]
+        path: Option<String>,
+    },
+
+    /// Reset (delete) current key
+    Reset {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        confirm: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse command line arguments
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    // Initialize tracing subscriber
-    init_tracing(&args.log_level)?;
+    // Initialize tracing subscriber (skip for some quiet commands)
+    let skip_tracing = matches!(
+        cli.command,
+        Some(Command::Self_ { exists: true, .. })
+            | Some(Command::Convert { .. })
+            | Some(Command::Key {
+                command: KeyCommand::Info { .. }
+            })
+    );
 
-    // Handle DNS setup/cleanup commands
-    if args.setup_dns {
+    if !skip_tracing {
+        init_tracing(&cli.log_level)?;
+    }
+
+    // Handle DNS setup/cleanup flags (for backward compatibility)
+    if cli.setup_dns {
         return dns_config::setup_dns();
     }
 
-    if args.cleanup_dns {
+    if cli.cleanup_dns {
         return dns_config::cleanup_dns();
     }
 
+    // Handle subcommands
+    match cli.command {
+        Some(Command::Convert { value, to }) => {
+            commands::convert::run(value, to)?;
+        }
+        Some(Command::Self_ {
+            format,
+            hex,
+            base32,
+            domain,
+            ipv6,
+            exists,
+        }) => {
+            commands::self_::run(format, hex, base32, domain, ipv6, exists)?;
+        }
+        Some(Command::Vanity {
+            prefix,
+            threads,
+            max_attempts,
+            save,
+            output,
+            quiet,
+        }) => {
+            commands::vanity::run(prefix, threads, max_attempts, save, output, quiet)?;
+        }
+        Some(Command::Key { command }) => match command {
+            KeyCommand::Info { path } => {
+                commands::key::info(path)?;
+            }
+            KeyCommand::Export { format, output } => {
+                commands::key::export(format, output)?;
+            }
+            KeyCommand::Import { file, save } => {
+                commands::key::import(file, save)?;
+            }
+            KeyCommand::Generate { save, force } => {
+                commands::key::generate(save, force)?;
+            }
+            KeyCommand::Validate { path } => {
+                commands::key::validate(path)?;
+            }
+            KeyCommand::Reset { confirm } => {
+                commands::key::reset(confirm)?;
+            }
+        },
+        Some(Command::Resolve {
+            domain,
+            server,
+            timeout,
+            json,
+        }) => {
+            commands::resolve::run(domain, server, timeout, json).await?;
+        }
+        None => {
+            // Default: start daemon (backward compatible)
+            start_daemon(cli.log_level, cli.dns_port).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Start the iron daemon (default behavior)
+async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     // Display banner
-    print_banner(&args);
+    print_banner(&log_level, dns_port);
 
     // Check if running as root (required for TUN device)
     #[cfg(unix)]
     check_root();
+
+    // Fix key directory ownership if needed (before dropping privileges)
+    #[cfg(unix)]
+    fix_key_directory_ownership()?;
 
     // Check if DNS is configured, offer to set it up if not
     check_and_setup_dns_if_needed()?;
@@ -76,13 +306,13 @@ async fn main() -> Result<()> {
     info!("Node ID (base32): {}", base32_id);
     info!("DNS name:         {}.iron", base32_id);
     info!("");
-    info!("DNS server will run on: 127.0.0.1:{}", args.dns_port);
+    info!("DNS server will run on: 127.0.0.1:{}", dns_port);
     info!("");
     info!("To connect to this node, other peers need:");
     info!("  - DNS name: {}.iron", base32_id);
     info!(
         "  - Or use dig: dig @127.0.0.1 -p {} {}.iron AAAA",
-        args.dns_port, base32_id
+        dns_port, base32_id
     );
     info!("");
     info!("Press Ctrl-C to shutdown gracefully");
@@ -174,15 +404,15 @@ fn init_tracing(log_level: &str) -> Result<()> {
 }
 
 /// Print startup banner with basic information
-fn print_banner(args: &Args) {
+fn print_banner(log_level: &str, dns_port: u16) {
     println!("┌─────────────────────────────────────────┐");
     println!("│          iron - P2P Network             │");
     println!("│   Peer-to-peer connectivity via iroh    │");
     println!("└─────────────────────────────────────────┘");
     println!();
     println!("Configuration:");
-    println!("  Log level:  {}", args.log_level);
-    println!("  DNS port:   {}", args.dns_port);
+    println!("  Log level:  {}", log_level);
+    println!("  DNS port:   {}", dns_port);
     println!();
 }
 
@@ -202,4 +432,70 @@ fn check_root() {
 fn check_root() {
     // Windows/other platforms: just continue
     // TUN device creation will fail with appropriate error message if privileges are insufficient
+}
+
+/// Fix key directory ownership if it's owned by root
+/// This happens when the daemon creates the directory as root
+#[cfg(unix)]
+fn fix_key_directory_ownership() -> Result<()> {
+    use anyhow::Context;
+    use nix::unistd::User;
+    use std::env;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+
+    let key_path = iron::keys::key_path();
+    let config_dir = key_path
+        .parent()
+        .context("Cannot determine config directory")?;
+
+    // Get the original user (before sudo)
+    let original_user = env::var("SUDO_USER")
+        .ok()
+        .and_then(|username| User::from_name(&username).ok().flatten());
+
+    if let Some(user) = original_user {
+        let target_uid = user.uid;
+        let target_gid = user.gid;
+
+        // Create config directory if it doesn't exist
+        if !config_dir.exists() {
+            info!("Creating config directory: {}", config_dir.display());
+            fs::create_dir_all(config_dir)?;
+        }
+
+        // Check if directory is owned by root
+        if let Ok(metadata) = fs::metadata(config_dir) {
+            let dir_uid = metadata.uid();
+
+            if dir_uid == 0 {
+                // Directory is owned by root, fix it
+                info!(
+                    "Fixing ownership of {} (was root, setting to {} uid={})",
+                    config_dir.display(),
+                    user.name,
+                    user.uid
+                );
+
+                // Change ownership using chown command
+                use std::process::Command;
+
+                let status = Command::new("chown")
+                    .arg("-R")
+                    .arg(format!("{}:{}", target_uid, target_gid))
+                    .arg(config_dir)
+                    .status()?;
+
+                if !status.success() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to change ownership of config directory"
+                    ));
+                }
+
+                info!("✓ Key directory ownership fixed");
+            }
+        }
+    }
+
+    Ok(())
 }

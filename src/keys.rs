@@ -22,6 +22,11 @@ fn key_dir_path() -> Result<PathBuf> {
 }
 
 /// Get the full path to the secret key file
+pub fn key_path() -> PathBuf {
+    key_file_path().unwrap_or_else(|_| PathBuf::from("~/.config/iron/secret.key"))
+}
+
+/// Get the full path to the secret key file (internal, returns Result)
 fn key_file_path() -> Result<PathBuf> {
     Ok(key_dir_path()?.join(KEY_FILE))
 }
@@ -46,7 +51,7 @@ pub fn load_or_generate_key() -> Result<SecretKey> {
 
     if key_path.exists() {
         info!("Loading existing key from {}", key_path.display());
-        load_key(&key_path)
+        load_key_from_path(&key_path)
     } else {
         info!("No existing key found, generating new key");
         let key = SecretKey::generate(&mut rand::rng());
@@ -56,8 +61,14 @@ pub fn load_or_generate_key() -> Result<SecretKey> {
     }
 }
 
+/// Load a secret key from a file (public version without path)
+pub fn load_key() -> Result<SecretKey> {
+    let key_path = key_file_path()?;
+    load_key_from_path(&key_path)
+}
+
 /// Load a secret key from a file
-fn load_key(path: &PathBuf) -> Result<SecretKey> {
+fn load_key_from_path(path: &PathBuf) -> Result<SecretKey> {
     let bytes = fs::read(path).context("Failed to read key file")?;
 
     if bytes.len() != 32 {
@@ -139,7 +150,7 @@ mod tests {
         save_key(&key_path, &original_key).unwrap();
 
         // Load the key
-        let loaded_key = load_key(&key_path).unwrap();
+        let loaded_key = load_key_from_path(&key_path).unwrap();
 
         // Verify they're the same
         assert_eq!(
@@ -154,7 +165,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("nonexistent.key");
 
-        let result = load_key(&key_path);
+        let result = load_key_from_path(&key_path);
         assert!(result.is_err(), "Loading nonexistent key should fail");
     }
 
@@ -166,7 +177,7 @@ mod tests {
         // Write invalid data (wrong size)
         fs::write(&key_path, &[1, 2, 3, 4, 5]).unwrap();
 
-        let result = load_key(&key_path);
+        let result = load_key_from_path(&key_path);
         assert!(result.is_err(), "Loading key with invalid size should fail");
     }
 

@@ -55,7 +55,7 @@ impl Registry {
         }
 
         // Derive a new IPv6 address
-        let ip = self.derive_ip(&endpoint_id);
+        let ip = Self::derive_ip(endpoint_id);
         debug!("New mapping: {} -> {}", endpoint_id, ip);
 
         // Insert into both maps for bi-directional lookup
@@ -96,7 +96,7 @@ impl Registry {
     /// let suffix = &bytes[24..32];        // Last 8 bytes
     /// // Construct: fd69:726f:0000:0000:[suffix as 4x u16]
     /// ```
-    fn derive_ip(&self, endpoint_id: &EndpointId) -> Ipv6Addr {
+    pub fn derive_ip(endpoint_id: EndpointId) -> Ipv6Addr {
         let bytes = endpoint_id.as_bytes();
 
         // Take last 8 bytes (64 bits) for the IPv6 suffix
@@ -144,13 +144,13 @@ mod tests {
 
     #[test]
     fn test_derive_ip_deterministic() {
-        let registry = Registry::new();
+        let _registry = Registry::new();
         let endpoint_id = test_endpoint_id(42);
 
         // Derive IP multiple times - should always be the same
-        let ip1 = registry.derive_ip(&endpoint_id);
-        let ip2 = registry.derive_ip(&endpoint_id);
-        let ip3 = registry.derive_ip(&endpoint_id);
+        let ip1 = Registry::derive_ip(endpoint_id);
+        let ip2 = Registry::derive_ip(endpoint_id);
+        let ip3 = Registry::derive_ip(endpoint_id);
 
         assert_eq!(ip1, ip2, "Derivation should be deterministic");
         assert_eq!(ip2, ip3, "Derivation should be deterministic");
@@ -158,10 +158,10 @@ mod tests {
 
     #[test]
     fn test_derive_ip_prefix() {
-        let registry = Registry::new();
+        let _registry = Registry::new();
         let endpoint_id = test_endpoint_id(1);
 
-        let ip = registry.derive_ip(&endpoint_id);
+        let ip = Registry::derive_ip(endpoint_id);
         let segments = ip.segments();
 
         // Check that prefix is correct: fd69:726f:0000:0000
@@ -169,6 +169,120 @@ mod tests {
         assert_eq!(segments[1], 0x726f, "Second segment should be 0x726f");
         assert_eq!(segments[2], 0x0000, "Third segment should be 0x0000");
         assert_eq!(segments[3], 0x0000, "Fourth segment should be 0x0000");
+    }
+
+    #[test]
+    fn test_get_or_assign_ip() {
+        let registry = Registry::new();
+        let endpoint_id = test_endpoint_id(1);
+
+        let ip1 = registry.get_or_assign_ip(endpoint_id);
+
+        // Should be derived, not assigned
+        let ip2 = registry.get_or_assign_ip(endpoint_id);
+
+        assert_eq!(ip1, ip2, "Should return consistent IP for same endpoint");
+    }
+
+    #[test]
+    fn test_get_endpoint_id() {
+        let registry = Registry::new();
+        let endpoint_id = test_endpoint_id(1);
+
+        let ip = registry.get_or_assign_ip(endpoint_id);
+
+        let found_endpoint = registry.get_endpoint_id(&ip);
+        assert_eq!(
+            found_endpoint,
+            Some(endpoint_id),
+            "Should find endpoint by IP"
+        );
+    }
+
+    #[test]
+    fn test_get_endpoint_id_unknown() {
+        let registry = Registry::new();
+
+        // Generate a random IP that won't be in the registry
+        let random_ip = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0x9999, 0x9999);
+        assert!(
+            registry.get_endpoint_id(&random_ip).is_none(),
+            "Unknown IP should return None"
+        );
+    }
+
+    #[test]
+    fn test_different_endpoints_get_different_ips() {
+        let registry = Registry::new();
+        let endpoint1 = test_endpoint_id(1);
+        let endpoint2 = test_endpoint_id(2);
+
+        let ip1 = registry.get_or_assign_ip(endpoint1);
+        let ip2 = registry.get_or_assign_ip(endpoint2);
+
+        assert_ne!(ip1, ip2, "Different endpoints should get different IPs");
+    }
+
+    #[test]
+    fn test_assignment_lifecycle() {
+        for _ in 0..5 {
+            let registry = Registry::new();
+
+            // Generate a random endpoint
+            let endpoint_bytes = [0u8; 32];
+            let endpoint_id = EndpointId::from_bytes(&endpoint_bytes).unwrap();
+
+            let ip = registry.get_or_assign_ip(endpoint_id);
+
+            // IP should be in the correct prefix range
+            let segments = ip.segments();
+            assert_eq!(segments[0], 0xfd69);
+            assert_eq!(segments[1], 0x726f);
+
+            // Should be able to look up endpoint by IP
+            let found = registry.get_endpoint_id(&ip);
+            assert_eq!(found, Some(endpoint_id));
+
+            // Requesting again should return the same IP
+            let ip2 = registry.get_or_assign_ip(endpoint_id);
+            assert_eq!(ip, ip2);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_assignments() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let registry = Arc::new(Registry::new());
+        let mut handles = vec![];
+
+        // Create 10 unique endpoints
+        let endpoints: Vec<_> = (0..10).map(test_endpoint_id).collect();
+
+        // Pre-assign all IPs in main thread
+        for endpoint in &endpoints {
+            registry.get_or_assign_ip(*endpoint);
+        }
+
+        // Spawn threads that will query these IPs
+        for endpoint in endpoints.iter() {
+            let registry = Arc::clone(&registry);
+            let endpoint = *endpoint;
+
+            let handle = thread::spawn(move || {
+                let ip = registry.get_or_assign_ip(endpoint);
+                let found = registry.get_endpoint_id(&ip);
+                assert_eq!(found, Some(endpoint));
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 
     #[test]
