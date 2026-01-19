@@ -1,6 +1,6 @@
 use crate::mapping::Registry;
 use anyhow::{Context, Result};
-use etherparse::Ipv6Header;
+use etherparse::{Ipv6Header, TcpHeader};
 use futures::StreamExt;
 use iroh::EndpointId;
 use std::net::Ipv6Addr;
@@ -339,6 +339,12 @@ impl TunInterface {
                 // Network → OS: Receive packet from iroh, write to TUN
                 Some(packet) = self.from_network_rx.recv() => {
                     debug!("Received packet from network, writing to TUN ({} bytes)", packet.len());
+
+                    // Inspect packet for debugging
+                    if let Err(e) = Self::inspect_packet(&packet, "Network→OS") {
+                        trace!("Failed to inspect packet: {}", e);
+                    }
+
                     use futures::SinkExt;
                     if let Err(e) = framed.send(packet.into()).await {
                         error!("Failed to write packet to TUN: {}", e);
@@ -401,6 +407,11 @@ impl TunInterface {
             packet.len()
         );
 
+        // Inspect packet for debugging
+        if let Err(e) = Self::inspect_packet(packet, "OS→Network") {
+            trace!("Failed to inspect packet: {}", e);
+        }
+
         // Lookup EndpointId for destination
         if let Some(endpoint_id) = self.registry.get_endpoint_id(&dest_addr) {
             debug!(
@@ -418,6 +429,43 @@ impl TunInterface {
                 "No EndpointId found for destination {}, dropping packet",
                 dest_addr
             );
+        }
+
+        Ok(())
+    }
+
+    /// Inspect a packet for debugging purposes
+    ///
+    /// Parses IPv6 and TCP headers to log detailed packet information
+    fn inspect_packet(packet: &[u8], direction: &str) -> Result<()> {
+        if packet.is_empty() {
+            return Ok(());
+        }
+
+        // Parse IPv6 header
+        let (ipv6_header, ipv6_payload) = Ipv6Header::from_slice(packet)?;
+
+        // Check if it's TCP (next_header == 6)
+        if ipv6_header.next_header == etherparse::IpNumber::TCP {
+            // Parse TCP header
+            if let Ok((tcp_header, _)) = TcpHeader::from_slice(ipv6_payload) {
+                trace!(
+                    "{}: TCP {}:{} -> {}:{} [seq={}, ack={}, flags={}{}{}{}{}] checksum=0x{:04x}",
+                    direction,
+                    ipv6_header.source_addr(),
+                    tcp_header.source_port,
+                    ipv6_header.destination_addr(),
+                    tcp_header.destination_port,
+                    tcp_header.sequence_number,
+                    tcp_header.acknowledgment_number,
+                    if tcp_header.syn { "SYN " } else { "" },
+                    if tcp_header.ack { "ACK " } else { "" },
+                    if tcp_header.fin { "FIN " } else { "" },
+                    if tcp_header.rst { "RST " } else { "" },
+                    if tcp_header.psh { "PSH " } else { "" },
+                    tcp_header.checksum
+                );
+            }
         }
 
         Ok(())
