@@ -114,7 +114,10 @@ impl IronProtocol {
             trace!("Reusing cached connection to {}", dest);
             cached_conn.value().clone()
         } else {
-            trace!("Creating new connection to {}", dest);
+            info!(
+                "Attempting to connect to peer {} (no cached connection)",
+                dest
+            );
             // Create new connection
             let new_conn = self
                 .endpoint
@@ -124,7 +127,7 @@ impl IronProtocol {
 
             // Cache it for future use
             self.connection_pool.insert(*dest, new_conn.clone());
-            debug!("Cached new connection to {}", dest);
+            info!("Successfully connected to {} and cached connection", dest);
             new_conn
         };
 

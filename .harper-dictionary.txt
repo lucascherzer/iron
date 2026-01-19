@@ -2,5 +2,6 @@ DashMap
 EndpointId
 RTT
 TLD
+base32
 iroh
 rapace

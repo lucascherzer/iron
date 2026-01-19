@@ -141,14 +141,30 @@ impl RequestHandler for IronDnsHandler {
             return response_handle.send_response(response).await.unwrap();
         }
 
-        // Only handle AAAA queries
+        // Only handle AAAA queries for .iron domains
+        // For other query types (A, MX, etc.), return authoritative empty answer
+        // This tells resolvers: "I'm authoritative for this domain, but it has no A record"
         if query.query_type() != RecordType::AAAA {
-            debug!(
-                "Not an AAAA query (got {:?}), returning empty response",
+            trace!(
+                "Not an AAAA query for .iron domain (got {:?}), returning authoritative empty answer",
                 query.query_type()
             );
-            let response = MessageResponseBuilder::from_message_request(request)
-                .build_no_records(*request.header());
+
+            // Return authoritative NOERROR with SOA record in authority section
+            // This is the correct DNS response for "domain exists but no record of this type"
+            let mut header = Header::response_from_request(request.header());
+            header.set_authoritative(true);
+            header.set_response_code(ResponseCode::NoError);
+
+            // Build response with empty answer section
+            // The authoritative flag tells clients not to retry
+            let response = MessageResponseBuilder::from_message_request(request).build(
+                header,
+                &[],
+                &[],
+                &[],
+                &[],
+            );
             return response_handle.send_response(response).await.unwrap();
         }
 

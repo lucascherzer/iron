@@ -78,6 +78,9 @@ impl TunInterface {
         info!("Creating TUN device (requires root/sudo)");
         let mut config = Configuration::default();
 
+        // Configure IPv6-only TUN device (Layer 3)
+        // Note: IPv4 addresses are required by tun crate but ignored for IPv6 traffic
+        // The actual IPv6 configuration happens in configure_ipv6()
         config
             .layer(Layer::L3)
             .address((169, 254, 0, 1))
@@ -115,6 +118,15 @@ impl TunInterface {
         };
         info!("TUN device created: {}", tun_name);
 
+        // Disable IPv4 on the interface (we only use IPv6)
+        match self.disable_ipv4(&tun_name) {
+            Ok(_) => debug!("IPv4 disabled on interface"),
+            Err(e) => {
+                warn!("Failed to disable IPv4 (non-critical): {}", e);
+                // Continue anyway - this is not critical
+            }
+        }
+
         // Configure IPv6 address on the interface
         match self.configure_ipv6(&tun_name) {
             Ok(_) => debug!("IPv6 configuration successful"),
@@ -125,6 +137,57 @@ impl TunInterface {
         }
 
         Ok(device)
+    }
+
+    /// Disables IPv4 on the TUN interface
+    ///
+    /// This ensures the interface only handles IPv6 traffic, preventing
+    /// the OS from sending any IPv4 packets to the TUN device.
+    fn disable_ipv4(&self, tun_name: &str) -> Result<()> {
+        info!("Disabling IPv4 on {}", tun_name);
+
+        #[cfg(target_os = "macos")]
+        {
+            // Remove the IPv4 address configuration
+            // Format: ifconfig <interface> inet <address> delete
+            let output = std::process::Command::new("ifconfig")
+                .arg(tun_name)
+                .arg("inet")
+                .arg("169.254.0.1")
+                .arg("delete")
+                .output()
+                .context("Failed to execute ifconfig")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Might not exist, that's okay
+                debug!("IPv4 removal returned: {}", stderr);
+            } else {
+                info!("IPv4 address removed from {}", tun_name);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Remove all IPv4 addresses
+            let output = std::process::Command::new("ip")
+                .arg("-4")
+                .arg("addr")
+                .arg("flush")
+                .arg("dev")
+                .arg(tun_name)
+                .output()
+                .context("Failed to execute ip command")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                debug!("IPv4 flush returned: {}", stderr);
+            }
+
+            info!("IPv4 disabled on {}", tun_name);
+        }
+
+        Ok(())
     }
 
     /// Configures IPv6 address and routing on the TUN interface
@@ -304,10 +367,32 @@ impl TunInterface {
     /// This method is public to allow integration testing without requiring
     /// actual TUN device creation (which needs root privileges).
     pub async fn handle_os_to_network(&self, packet: &[u8]) -> Result<()> {
+        // Filter out non-IPv6 packets
+        if packet.is_empty() {
+            return Ok(());
+        }
+
+        // Check IP version (first 4 bits should be 6 for IPv6)
+        let version = (packet[0] >> 4) & 0x0F;
+        if version != 6 {
+            trace!("Ignoring non-IPv6 packet (version {})", version);
+            return Ok(());
+        }
+
         // Parse IPv6 header
         let ipv6_header = Ipv6Header::from_slice(packet).context("Failed to parse IPv6 header")?;
 
         let dest_addr = ipv6_header.0.destination_addr();
+
+        // Filter out multicast packets (ff00::/8)
+        // These are broadcast packets (MLD, mDNS, etc.) that don't have specific destinations
+        if dest_addr.octets()[0] == 0xff {
+            trace!(
+                "Ignoring multicast packet to {} (not a peer address)",
+                dest_addr
+            );
+            return Ok(());
+        }
 
         debug!(
             "TUN received OS→Network: {} -> {}, {} bytes",
