@@ -175,7 +175,7 @@ mod tests {
         let key_path = temp_dir.path().join("invalid.key");
 
         // Write invalid data (wrong size)
-        fs::write(&key_path, &[1, 2, 3, 4, 5]).unwrap();
+        fs::write(&key_path, [1, 2, 3, 4, 5]).unwrap();
 
         let result = load_key_from_path(&key_path);
         assert!(result.is_err(), "Loading key with invalid size should fail");

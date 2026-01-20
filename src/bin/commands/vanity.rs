@@ -83,17 +83,17 @@ pub fn run(
                 }
 
                 // Update progress periodically
-                if local_attempts % 10_000 == 0 {
+                if local_attempts.is_multiple_of(10_000) {
                     total_attempts.fetch_add(10_000, Ordering::Relaxed);
                     local_attempts = 0;
                 }
 
                 // Check max attempts
-                if let Some(max) = max_attempts {
-                    if total_attempts.load(Ordering::Relaxed) >= max {
-                        found.store(true, Ordering::Relaxed);
-                        break;
-                    }
+                if let Some(max) = max_attempts
+                    && total_attempts.load(Ordering::Relaxed) >= max
+                {
+                    found.store(true, Ordering::Relaxed);
+                    break;
                 }
             }
         });
@@ -214,19 +214,17 @@ pub fn run(
             let key_path = keys::key_path();
 
             // Check if key already exists
-            if key_path.exists() {
-                if !quiet {
-                    print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
-                    io::stdout().flush()?;
-                    let mut input = String::new();
-                    io::stdin().read_line(&mut input)?;
-                    if !input.trim().eq_ignore_ascii_case("y") {
-                        println!("Cancelled. Key not saved.");
-                        println!();
-                        println!("Secret key (save manually if needed):");
-                        println!("  {}", hex::encode(result.secret_key.to_bytes()));
-                        return Ok(());
-                    }
+            if key_path.exists() && !quiet {
+                print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("Cancelled. Key not saved.");
+                    println!();
+                    println!("Secret key (save manually if needed):");
+                    println!("  {}", hex::encode(result.secret_key.to_bytes()));
+                    return Ok(());
                 }
             }
 

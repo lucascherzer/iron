@@ -346,7 +346,7 @@ impl TunInterface {
                     }
 
                     use futures::SinkExt;
-                    if let Err(e) = framed.send(packet.into()).await {
+                    if let Err(e) = framed.send(packet).await {
                         error!("Failed to write packet to TUN: {}", e);
                     } else {
                         debug!("Successfully wrote packet to TUN");

@@ -115,8 +115,8 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
         let key_path = keys::key_path();
 
         if key_path.exists() && !force {
-            print!("\nWARNING: This will overwrite your existing key.\n");
-            print!("You will get a new Node ID and .iron domain.\n");
+            println!("\nWARNING: This will overwrite your existing key.");
+            println!("You will get a new Node ID and .iron domain.");
             print!("Generate new key? (y/N) ");
             io::stdout().flush()?;
             let mut input = String::new();
@@ -179,7 +179,7 @@ pub fn reset(confirm: bool) -> Result<()> {
 
     if !confirm {
         print!("\nWARNING: This will delete your key file permanently.\n");
-        print!("You will lose your current Node ID: {}\n", current_node_id);
+        println!("You will lose your current Node ID: {}", current_node_id);
         print!("Delete key? (y/N) ");
         io::stdout().flush()?;
         let mut input = String::new();

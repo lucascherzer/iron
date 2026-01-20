@@ -88,16 +88,15 @@ impl IronDnsHandler {
 
         // Base32 decode (uppercase, no padding) - case insensitive
         if let Ok(bytes) = data_encoding::BASE32_NOPAD.decode(encoded_id.to_uppercase().as_bytes())
+            && bytes.len() == 32
         {
-            if bytes.len() == 32 {
-                // Convert to [u8; 32] - safe because we checked length
-                let mut byte_array = [0u8; 32];
-                byte_array.copy_from_slice(&bytes);
+            // Convert to [u8; 32] - safe because we checked length
+            let mut byte_array = [0u8; 32];
+            byte_array.copy_from_slice(&bytes);
 
-                if let Ok(endpoint_id) = EndpointId::from_bytes(&byte_array) {
-                    trace!("Parsed EndpointId from domain: {}", endpoint_id);
-                    return Some(endpoint_id);
-                }
+            if let Ok(endpoint_id) = EndpointId::from_bytes(&byte_array) {
+                trace!("Parsed EndpointId from domain: {}", endpoint_id);
+                return Some(endpoint_id);
             }
         }
 
@@ -142,7 +141,7 @@ impl RequestHandler for IronDnsHandler {
                     Ok(info) => info,
                     Err(e) => {
                         warn!("Failed to send error response: {}", e);
-                        ResponseInfo::from(request.header().clone())
+                        ResponseInfo::from(*request.header())
                     }
                 };
             }
@@ -159,7 +158,7 @@ impl RequestHandler for IronDnsHandler {
                 Ok(info) => info,
                 Err(e) => {
                     warn!("Failed to send REFUSED response: {}", e);
-                    ResponseInfo::from(request.header().clone())
+                    ResponseInfo::from(*request.header())
                 }
             };
         }
@@ -195,7 +194,7 @@ impl RequestHandler for IronDnsHandler {
                 Ok(info) => info,
                 Err(e) => {
                     warn!("Failed to send empty AAAA response: {}", e);
-                    ResponseInfo::from(request.header().clone())
+                    ResponseInfo::from(*request.header())
                 }
             };
         }
@@ -225,7 +224,7 @@ impl RequestHandler for IronDnsHandler {
                 Ok(info) => info,
                 Err(e) => {
                     warn!("Failed to send AAAA response for {}: {}", query.name(), e);
-                    ResponseInfo::from(request.header().clone())
+                    ResponseInfo::from(*request.header())
                 }
             }
         } else {
@@ -237,7 +236,7 @@ impl RequestHandler for IronDnsHandler {
                 Ok(info) => info,
                 Err(e) => {
                     warn!("Failed to send NXDOMAIN response: {}", e);
-                    ResponseInfo::from(request.header().clone())
+                    ResponseInfo::from(*request.header())
                 }
             }
         }

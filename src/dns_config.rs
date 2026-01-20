@@ -14,7 +14,7 @@ pub enum Platform {
 pub fn detect_platform() -> Platform {
     #[cfg(target_os = "macos")]
     {
-        return Platform::MacOS;
+        Platform::MacOS
     }
 
     #[cfg(target_os = "linux")]
@@ -115,7 +115,7 @@ Domains=~iron
     // Restart systemd-resolved
     info!("Restarting systemd-resolved");
     let status = std::process::Command::new("systemctl")
-        .args(&["restart", "systemd-resolved"])
+        .args(["restart", "systemd-resolved"])
         .status()
         .context("Failed to restart systemd-resolved")?;
 
@@ -184,7 +184,7 @@ fn cleanup_dns_linux_systemd() -> Result<()> {
     // Restart systemd-resolved
     info!("Restarting systemd-resolved");
     let status = std::process::Command::new("systemctl")
-        .args(&["restart", "systemd-resolved"])
+        .args(["restart", "systemd-resolved"])
         .status()
         .context("Failed to restart systemd-resolved")?;
 
