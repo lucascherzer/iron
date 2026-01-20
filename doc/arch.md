@@ -23,7 +23,7 @@ also makes for a good TLD.
 
 # Components
 
-We require two components for this to work:
+We require the following components for this to work:
 1. A `.iron` resolver which can map `<endpoint_id>.iron` to a deterministic IPv6 address
   in the Unique Local Address (ULA) space. The mapping is deterministic based on
   the EndpointId to ensure consistency. For close integration with existing software,
@@ -32,6 +32,12 @@ We require two components for this to work:
   advertising to route addresses within the ULA address spaces. It uses the
   resolver in reverse, taking the IPv6 address and getting its associated iroh
   EndpointId. And sending the data off.
+3. A key management system that persists the node's private key across restarts,
+  ensuring consistent EndpointId (stored in `~/.config/iron/secret.key`).
+4. A DNS auto-configuration system that sets up system-level DNS resolution for
+  `.iron` domains on supported platforms (macOS, Linux with systemd-resolved).
+5. A CLI interface providing utilities for node management, key operations, and
+  format conversions.
 
 # Packet Flow Architecture
 
@@ -177,6 +183,17 @@ pub async fn run(&self) -> Result<()> {
 - One QUIC connection per remote EndpointId
 - Bi-directional streams for packet forwarding
 - Leverage iroh's built-in NAT traversal and relay support
+- **Connection pooling**: Cached connections reused to avoid repeated handshakes
+
+**Security Features**:
+- Source address rewriting: Packets have source IPv6 rewritten to match authenticated sender
+- Prevents source address spoofing by trusting iroh's crypto instead of packet headers
+
+**Key Persistence**:
+- Private keys stored in `~/.config/iron/secret.key` (0600 permissions)
+- Automatically generated on first run
+- Ensures consistent EndpointId across restarts
+- Ownership auto-fixed when run with sudo (prevents root-owned files in user directory)
 
 ## Testing Strategy
 **Initial Approach**: Manual testing with two local iron nodes
@@ -185,7 +202,53 @@ pub async fn run(&self) -> Result<()> {
 - Test connectivity: `ping6 fd69:726f::...`
 - Simple, fast iteration during development
 
-**Future**: Automated integration tests with tokio test infrastructure
+**Current**: Automated unit and integration tests
+- 30+ unit tests across all components
+- Integration tests for packet flow
+- CLI utilities for testing (`iron resolve`, `iron convert`)
+
+**Future**: End-to-end automated testing with virtual networks
+
+## DNS Auto-Configuration
+**Supported Platforms**:
+- macOS: Uses `/etc/resolver/iron` (domain-specific DNS)
+- Linux (systemd-resolved): Uses `/etc/systemd/resolved.conf.d/iron.conf`
+
+**Features**:
+- Automatic detection of platform and DNS system
+- Sets up DNS on daemon startup (`sudo iron`)
+- Only routes `.iron` domains to iron DNS server
+- Coexists with VPNs, Tailscale, and other DNS configurations
+- Automatic cleanup on shutdown (Ctrl-C or SIGTERM)
+- Manual cleanup available: `sudo iron --cleanup-dns`
+
+**Unsupported Platforms**:
+- Linux without systemd-resolved: Manual DNS configuration required
+- See `doc/dns-setup.md` for manual setup instructions
+
+## CLI Interface
+Iron provides a comprehensive CLI with the following commands:
+
+**Daemon Mode** (default):
+```bash
+sudo iron                    # Start daemon with auto DNS setup
+sudo iron --dns-port 5353   # Use custom DNS port
+sudo iron --log-level debug # Enable debug logging
+sudo iron --cleanup-dns     # Cleanup DNS config and exit
+```
+
+**Utility Commands**:
+```bash
+iron convert <value>                  # Convert between formats (hex, base32, .iron, IPv6)
+iron self                             # Show node information
+iron vanity <prefix>                  # Generate vanity address with prefix
+iron key info                         # Show key information
+iron key generate --save              # Generate new key
+iron key export --format hex          # Export key
+iron resolve <domain>                 # Test DNS resolution
+```
+
+See `doc/cli.md` for detailed command documentation.
 
 # No-std Considerations
 **Decision**: Use std for MVP

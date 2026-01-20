@@ -2,11 +2,89 @@
 
 iron runs a DNS server on `127.0.0.1:5333` that resolves `.iron` domains to IPv6 addresses. To use `.iron` domains, you need to configure your system to query iron's DNS server.
 
-**We provide multiple methods - choose what works best for your setup.**
+**As of version 0.1.0, iron automatically configures DNS on supported platforms!**
 
 ---
 
-## Method 1: Per-Application DNS (Recommended for Testing)
+## Method 0: Automatic Setup (Recommended)
+
+**Supported Platforms:**
+- ✅ macOS (via `/etc/resolver/iron`)
+- ✅ Linux with systemd-resolved (via `/etc/systemd/resolved.conf.d/iron.conf`)
+
+### How it Works
+
+When you start iron with `sudo iron`, it automatically:
+
+1. **Detects your platform** and DNS system
+2. **Configures DNS** for `.iron` domains only (other domains unaffected)
+3. **Cleans up on shutdown** (automatically removes configuration)
+
+### Usage
+
+```bash
+# Start iron (DNS auto-configures on startup)
+sudo iron
+
+# DNS is now configured - .iron domains work system-wide!
+# Press Ctrl-C to stop (auto-cleans up DNS configuration)
+```
+
+### Manual Cleanup (if needed)
+
+If iron crashes or is killed before cleanup:
+
+```bash
+# Remove DNS configuration manually
+sudo iron --cleanup-dns
+```
+
+### Verification
+
+**macOS:**
+```bash
+# Check resolver configuration
+scutil --dns | grep -A3 iron
+
+# Should show:
+#   resolver #X
+#   domain   : iron
+#   nameserver[0] : 127.0.0.1
+#   port     : 5333
+```
+
+**Linux (systemd-resolved):**
+```bash
+# Check resolver status
+resolvectl status
+
+# Should show iron in the DNS Servers list
+```
+
+### Troubleshooting
+
+**"Failed to setup DNS"**
+- Ensure you're running as root: `sudo iron`
+- Check file permissions on `/etc/resolver/` (macOS) or `/etc/systemd/resolved.conf.d/` (Linux)
+
+**DNS not working after setup**
+- Verify iron is running: `lsof -i :5333`
+- Test direct query: `dig @127.0.0.1 -p 5333 <node-id>.iron AAAA`
+- On Linux: Try `sudo systemctl restart systemd-resolved`
+
+**Pros:**
+- ✅ Fully automatic - no manual configuration
+- ✅ Only routes `.iron` queries to iron
+- ✅ Coexists with VPNs, Tailscale, etc.
+- ✅ Auto-cleanup on shutdown
+
+**Cons:**
+- ❌ Requires root/sudo privileges
+- ❌ Only works on macOS and Linux with systemd
+
+---
+
+## Method 1: Per-Application DNS (For Testing)
 
 Use DNS directly in applications without modifying system DNS.
 
@@ -254,14 +332,14 @@ let response = resolver.lookup_ip("<node-id>.iron").await?;
 
 ## Recommendations by Use Case
 
-### Testing / Development
+### General Use (Recommended)
+→ **Method 0 (Automatic)** - Works on macOS and Linux with systemd
+
+### Testing / Development (No Root)
 → **Method 1 (Per-Application)** - Quick and isolated
 
-### Linux Desktop / Server
-→ **Method 2 (systemd-resolved)** - Clean and integrated
-
-### macOS Desktop
-→ **Method 5 (Resolver Directory)** - Native and coexists with everything
+### Linux Desktop / Server (Non-systemd)
+→ **Method 3 (dnsmasq)** - Maximum flexibility
 
 ### Advanced / Complex Setups
 → **Method 3 (dnsmasq)** - Maximum flexibility
@@ -271,6 +349,9 @@ let response = resolver.lookup_ip("<node-id>.iron").await?;
 
 ### Programmatic Use
 → **Method 6 (Custom Resolver)** - Full control
+
+### Unsupported Platforms
+→ **Methods 1-6 (Manual)** - Choose based on your system
 
 ---
 
@@ -348,28 +429,54 @@ iron's DNS server is only accessible locally by default, mitigating DNS spoofing
 
 ## Example Workflow
 
+### Quick Start (Automatic DNS)
+
 **1. Start iron**
 ```bash
 sudo iron
 ```
 
-**2. Note your Node ID (base32 format)**
+**2. DNS is automatically configured! Note your Node ID:**
 ```
 Node ID (base32): ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq
 DNS name:         ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq.iron
+
+✓ DNS configured successfully!
+
+  .iron domains will now resolve automatically
+  All other domains use your normal DNS
 ```
 
-**3. Configure DNS (choose one method above)**
-
-**4. Test**
+**3. Test DNS resolution**
 ```bash
-dig ot36ptgm67yp5kjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq.iron AAAA
+dig ot36ptgm67yp5vjt6b6dtz2l4ppejtggt5w3y64lqqrvztpl2wnq.iron AAAA
 ```
 
-**5. Connect to peer**
+**4. Connect to peer**
 ```bash
 # Get peer's Node ID (they share their base32 Node ID with you)
 ping6 <peer-node-id>.iron
 ```
 
+**5. Stop iron (auto-cleanup)**
+```bash
+# Press Ctrl-C
+# DNS configuration is automatically removed
+```
+
 Done! 🎉
+
+### Manual Configuration (Unsupported Platforms)
+
+If automatic DNS setup doesn't work (non-systemd Linux, other platforms):
+
+**1. Start iron**
+```bash
+sudo iron
+```
+
+**2. Configure DNS manually** (choose one method above - Methods 1-6)
+
+**3. Test and connect** (same as steps 3-4 above)
+
+**Note:** Manual DNS configuration won't auto-cleanup on shutdown.

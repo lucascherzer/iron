@@ -82,9 +82,11 @@ abc123def456...xyz789.iron  →  fd69:726f::xxxx:xxxx:xxxx:xxxx
 ### DNS Server Configuration
 
 - **Listen Address**: `127.0.0.1:5333` (non-standard port, no root required)
+  - Configurable via `--dns-port` flag
 - **Protocol**: UDP/TCP DNS (hickory-server)
 - **Record Type**: AAAA (IPv6 only)
-- **TTL**: Short (60s) to allow dynamic updates
+- **TTL**: 300s (5 minutes)
+- **Auto-Configuration**: Automatically sets up system DNS on startup (macOS, Linux systemd)
 
 ### Query Flow
 
@@ -206,24 +208,29 @@ endpoint.connect(peer_addr, b"iron/packet/0").await?;
 
 **Over QUIC Streams**:
 
-Option A: **Stream per packet** (simple)
+**Current Implementation**: Stream per packet with connection pooling
+```rust
+// Open bi-directional stream per packet
+let (mut send, _recv) = conn.open_bi().await?;
+send.write_all(packet).await?;
+send.finish()?;
 ```
-Open uni-directional stream
-Write packet data
-Close stream
-```
-- Simple implementation
-- Higher overhead (stream setup per packet)
 
-Option B: **Framed stream** (efficient)
-```
-[length: u16 BE][packet_data: [u8]]
-```
-- Lower overhead
-- Requires stream management
-- Better for high-throughput
+**Connection Pooling Optimization**:
+- Maintains cache of QUIC connections per EndpointId (`DashMap<EndpointId, Connection>`)
+- Reuses existing connections instead of repeated handshakes
+- Automatically retries with new connection if cached connection is stale
+- Significant performance improvement over naive per-packet connect
 
-**MVP**: Use Option A for simplicity, migrate to Option B if performance requires.
+**Why Not Framed Streams?**
+- Stream-per-packet is simpler and sufficient for current throughput
+- Connection pooling eliminates most handshake overhead
+- Can migrate to framed streams later if needed
+
+**Performance Characteristics**:
+- First packet to peer: Full QUIC handshake (~1-2 RTT)
+- Subsequent packets: Reuse cached connection (~0 RTT for stream setup)
+- Stale connection: Automatic retry with new connection
 
 ### NAT Traversal
 
@@ -278,12 +285,13 @@ Acceptable for desktop/server deployment.
 
 ## Security Considerations
 
-### Threat Model (MVP)
+### Threat Model
 
 **In scope**:
 - Authenticated connections (iroh's TLS-based QUIC)
 - Encrypted transport (QUIC encryption)
 - EndpointId verification (public key authentication)
+- Source address spoofing prevention (address rewriting)
 
 **Out of scope** (future):
 - Traffic analysis resistance
@@ -296,22 +304,57 @@ Acceptable for desktop/server deployment.
 - Trust iroh's cryptographic implementation
 - Trust peer's EndpointId (no PKI/certificate authority)
 - Local-only registry (no trust in remote registries)
+- **DNS is unauthenticated** - actual security comes from iroh's crypto
+
+### Source Address Rewriting
+
+**Security Feature**: Prevents IPv6 source address spoofing
+
+**How it works**:
+1. Peer sends packet with any source IPv6 address
+2. Iron receives packet via authenticated QUIC connection (knows sender's EndpointId)
+3. Iron **rewrites** source IPv6 to sender's derived address
+4. OS receives packet with correct, verified source address
+
+**Why it's secure**:
+- Iroh provides cryptographic authentication via EndpointId
+- Peer cannot fake another peer's EndpointId (would need private key)
+- We trust iroh's authentication, not the packet's claimed source
+- OS sees consistent source addresses for routing return packets
+
+**Implementation** (see `src/protocol.rs:292-328`):
+```rust
+fn rewrite_source_address(packet: Vec<u8>, sender_id: &EndpointId) -> Result<Vec<u8>> {
+    let (mut header, payload) = Ipv6Header::from_slice(&packet)?;
+    let sender_ipv6 = registry.get_or_assign_ip(*sender_id);
+    header.source = sender_ipv6.octets(); // Rewrite to verified address
+    // Rebuild packet...
+}
+```
+
+This is more secure than trusting the source address in the packet itself.
 
 ### Attack Vectors
 
 **Potential attacks**:
 1. **IPv6 collision**: Attacker generates EndpointId with same IPv6 suffix
    - Probability: ~2^-64 for random collision
-   - Mitigation: Check registry before accepting connection
+   - Mitigation: Check registry before accepting connection, source rewriting prevents spoofing
    
 2. **DNS spoofing**: Attacker intercepts DNS queries
    - Mitigation: Use 127.0.0.1 DNS server (no network exposure)
+   - Note: DNS only maps names to IPs - actual security is in iroh's crypto
    - Future: DNSSEC for external DNS integration
 
-3. **TUN device hijacking**: Attacker creates conflicting TUN device
+3. **Source address spoofing**: Peer sends packet with fake source IPv6
+   - Mitigation: **Source address rewriting** (implemented)
+   - We rewrite source to verified EndpointId-derived address
+   - OS always sees correct source for return packets
+   
+4. **TUN device hijacking**: Attacker creates conflicting TUN device
    - Mitigation: Root privileges required, OS-level protection
    
-4. **Connection hijacking**: Standard QUIC/TLS protections apply
+5. **Connection hijacking**: Standard QUIC/TLS protections apply
    - iroh handles this with endpoint authentication
 
 ## Testing Strategy

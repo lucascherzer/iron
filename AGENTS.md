@@ -5,6 +5,7 @@ See doc/arch.md for a general project description.
 We do a lot of vibe coding here, so simplicity of code style, appropriate,
 in-place documentation with optional references to other docs are imperative in
 order to avoid documentation going out-of-date when developing new features.
+Check the doc/ directory when making changes to reflect them.
 
 Agents should strive for: clean, sensibly deduplicated, testable code by
 implementing unit- and integration tests.
