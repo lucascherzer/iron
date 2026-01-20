@@ -41,8 +41,8 @@
 
           meta = with pkgs.lib; {
             description = "P2P network interface based on iroh";
-            homepage = "https://github.com/luca-scherzer/iron";
-            license = with licenses; [ mit asl20 ];
+            homepage = "https://github.com/lucascherzer/iron";
+            license = with licenses; [ gpl2Plus ];
             mainProgram = "iron";
           };
         });
