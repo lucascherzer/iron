@@ -17,12 +17,12 @@ Complete reference for all iron command-line interface commands.
 
 ## Daemon Mode
 
-The default mode - starts the iron daemon with TUN interface and DNS server.
+Start the iron daemon with TUN interface and DNS server.
 
 ### Basic Usage
 
 ```bash
-sudo iron
+sudo iron serve
 ```
 
 **Requires**: Root/sudo privileges (for TUN device creation)
@@ -38,22 +38,18 @@ sudo iron
 ### Options
 
 ```bash
-sudo iron [OPTIONS]
+sudo iron serve [OPTIONS]
 ```
 
 **Global Options**:
 - `--log-level <LEVEL>`: Set logging level
   - Values: `trace`, `debug`, `info`, `warn`, `error`
   - Default: `info`
-  - Example: `sudo iron --log-level debug`
+  - Example: `sudo iron serve --log-level debug`
 
 - `--dns-port <PORT>`: Custom DNS server port
   - Default: `5333`
-  - Example: `sudo iron --dns-port 5353`
-
-- `--cleanup-dns`: Remove DNS configuration and exit
-  - Useful if iron crashed and didn't auto-cleanup
-  - Example: `sudo iron --cleanup-dns`
+  - Example: `sudo iron serve --dns-port 5353`
 
 ### Example Output
 
@@ -154,16 +150,23 @@ fi
 **JSON output**:
 ```bash
 iron self --format json
+# or using short option
+iron self -f json
 ```
 
 **Output**:
 ```json
 {
-  "hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
-  "base32": "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq",
-  "domain": "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron",
-  "ipv6": "fd69:726f::3d36:8b3d:fa9b:0339",
-  "key_path": "/Users/you/.config/iron/secret.key"
+  "key_file": "/Users/you/.config/iron/secret.key",
+  "key_exists": true,
+  "node_id": {
+    "hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "base32": "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq"
+  },
+  "network": {
+    "domain": "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron",
+    "ipv6": "fd69:726f::3d36:8b3d:fa9b:0339"
+  }
 }
 ```
 
@@ -463,7 +466,9 @@ iron resolve example.iron --timeout 10
 
 **JSON output**:
 ```bash
-iron resolve <DOMAIN> --json
+iron resolve <DOMAIN> --format json
+# or using short option
+iron resolve <DOMAIN> -f json
 ```
 
 **Example output**:
@@ -472,8 +477,11 @@ iron resolve <DOMAIN> --json
   "domain": "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron",
   "ipv6": "fd69:726f::3d36:8b3d:fa9b:0339",
   "ttl": 300,
-  "server": "127.0.0.1:5333",
-  "query_time_ms": 12
+  "query_time_ms": 12,
+  "node_id": {
+    "hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+    "base32": "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq"
+  }
 }
 ```
 
@@ -640,7 +648,7 @@ iron self --exists
 # Exit code 1 = no key
 
 # 2. Start iron (will auto-generate key)
-sudo iron
+sudo iron serve
 
 # 3. Note your Node ID (share with peers)
 iron self --base32
@@ -680,7 +688,7 @@ iron self --domain
 ```bash
 # 1. Get peer's Node ID (base32 format)
 # 2. Start iron
-sudo iron
+sudo iron serve
 
 # 3. In another terminal, test DNS
 iron resolve <peer-base32>.iron
@@ -696,7 +704,7 @@ ping6 <resolved-ipv6>
 iron vanity alice --save
 
 # Restart iron to use new identity
-sudo iron
+sudo iron serve
 
 # Your new domain: alice....iron
 ```
@@ -720,7 +728,7 @@ iron self
 sudo iron --cleanup-dns
 
 # Run with debug logging
-sudo iron --log-level debug
+sudo iron serve --log-level debug
 ```
 
 ---

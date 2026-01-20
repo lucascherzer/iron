@@ -62,19 +62,19 @@ The binary will be at `target/release/iron`.
 
 **Basic usage (requires root):**
 ```bash
-sudo iron
+sudo iron serve
 ```
 
 On first run, iron will automatically configure DNS for `.iron` domains (macOS and Linux with systemd-resolved only). This configuration only affects `.iron` domains - all other DNS resolution remains unchanged.
 
 **With custom log level:**
 ```bash
-sudo iron --log-level debug
+sudo iron serve --log-level debug
 ```
 
 **With custom DNS port:**
 ```bash
-sudo iron --dns-port 5353
+sudo iron serve --dns-port 5353
 ```
 
 When iron starts, you'll see:
@@ -102,8 +102,10 @@ This means:
 
 **To reset your identity** (get a new Node ID and domain):
 ```bash
+iron key reset
+# or manually:
 rm ~/.config/iron/secret.key
-sudo iron
+sudo iron serve
 ```
 
 ### DNS Configuration
@@ -115,10 +117,7 @@ Iron automatically configures DNS on first run for supported platforms:
 
 **Manual DNS commands:**
 ```bash
-# Setup DNS (one-time, auto-runs on first start)
-sudo iron --setup-dns
-
-# Remove DNS configuration
+# Remove DNS configuration (cleanup if iron crashed)
 sudo iron --cleanup-dns
 ```
 
@@ -131,24 +130,34 @@ sudo iron --cleanup-dns
 
 ### Command Line Options
 
-```
-Usage: iron [OPTIONS]
+For complete CLI documentation, see [CLI Reference](doc/cli.md).
 
-Options:
-  -l, --log-level <LOG_LEVEL>  Set the log level [default: info]
-                               (trace, debug, info, warn, error)
-      --dns-port <DNS_PORT>    DNS server port [default: 5333]
-      --setup-dns              Setup DNS configuration for .iron domains
-      --cleanup-dns            Remove DNS configuration
-  -h, --help                   Print help
-  -V, --version                Print version
+```
+Usage: iron [COMMAND]
+
+Commands:
+  serve    Start the iron daemon (TUN interface and DNS server)
+  self     Show information about your node
+  convert  Convert between node ID formats
+  key      Key management utilities
+  resolve  Test DNS resolution
+  vanity   Generate vanity address with desired prefix
+  help     Print this message or the help of the given subcommand(s)
+
+Global Options:
+  -l, --log-level <LEVEL>  Set the log level [default: info]
+                           (trace, debug, info, warn, error)
+      --dns-port <PORT>    DNS server port [default: 5333]
+      --cleanup-dns        Remove DNS configuration for .iron domains
+  -h, --help               Print help
+  -V, --version            Print version
 ```
 
 ### Environment Variables
 
 - `RUST_LOG`: Control log levels per module (overrides `--log-level`)
   ```bash
-  RUST_LOG=iron::protocol=trace,iron=info sudo iron
+  RUST_LOG=iron::protocol=trace,iron=info sudo iron serve
   ```
 
 ## Connecting Two Nodes
@@ -173,14 +182,14 @@ Most applications will automatically fall back to IPv6, but using the `-6` flag 
 
 **Machine A:**
 ```bash
-sudo iron
+sudo iron serve
 # DNS configured automatically on first run
 # Note the base32 Node ID displayed
 ```
 
 **Machine B:**
 ```bash
-sudo iron
+sudo iron serve
 # DNS configured automatically on first run
 # Note the base32 Node ID displayed
 ```
@@ -189,6 +198,8 @@ sudo iron
 
 **Test DNS resolution:**
 ```bash
+iron resolve <MACHINE_A_BASE32_ID>.iron
+# or with dig:
 dig <MACHINE_A_BASE32_ID>.iron AAAA
 ```
 
@@ -272,7 +283,7 @@ IPv6: fd69:726f:0000:0000:039b:fa8b:3d36:8b3d
 
 TUN device creation requires elevated privileges. Use `sudo`:
 ```bash
-sudo iron
+sudo iron serve
 ```
 
 ### "Failed to create TUN device"
@@ -297,11 +308,15 @@ Iron automatically configures DNS on first run for macOS and Linux with systemd-
 
 2. Manually setup DNS if needed:
    ```bash
-   sudo iron --setup-dns
+   # DNS is auto-configured on first run of 'iron serve'
+   # If cleanup is needed:
+   sudo iron --cleanup-dns
    ```
 
 3. Test DNS directly:
    ```bash
+   iron resolve <node-id>.iron
+   # or with dig:
    dig @127.0.0.1 -p 5333 <node-id>.iron AAAA
    ```
 
@@ -321,14 +336,17 @@ Self-ping requires protocol-specific packet rewriting (ICMP echo reply, TCP hand
 
 1. **Verify Node ID**: Ensure you're using the correct EndpointId
 2. **Check logs**: Look for connection attempts with `--log-level debug`
+   ```bash
+   sudo iron serve --log-level debug
+   ```
 3. **Firewall**: Ensure UDP traffic is allowed (iroh uses QUIC over UDP)
 4. **Relay server**: Check if iroh can reach relay servers
 
 ### Performance Issues
 
 1. **Direct connection**: Check if direct connection established (vs relay)
-   ```
-   RUST_LOG=iron::protocol=debug sudo iron
+   ```bash
+   RUST_LOG=iron::protocol=debug sudo iron serve
    ```
 
 2. **MTU**: Verify MTU is set correctly (default 1420)
@@ -345,7 +363,7 @@ Self-ping requires protocol-specific packet rewriting (ICMP echo reply, TCP hand
 
 **Example per-module filtering:**
 ```bash
-RUST_LOG=iron::dns=debug,iron::tun=trace,iron=info sudo iron
+RUST_LOG=iron::dns=debug,iron::tun=trace,iron=info sudo iron serve
 ```
 
 ## Development

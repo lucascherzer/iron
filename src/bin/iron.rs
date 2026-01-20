@@ -32,6 +32,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Start the iron daemon (TUN interface and DNS server)
+    Serve,
+
     /// Convert between node ID formats (hex, base32, .iron domain, IPv6)
     Convert {
         /// Value to convert (auto-detects format)
@@ -45,8 +48,8 @@ enum Command {
     /// Show information about your node
     #[command(name = "self")]
     Self_ {
-        /// Output format
-        #[arg(long, value_name = "FORMAT")]
+        /// Output format (json, hex, base32)
+        #[arg(short = 'f', long, value_name = "FORMAT")]
         format: Option<String>,
 
         /// Show only hex Node ID
@@ -115,9 +118,9 @@ enum Command {
         #[arg(long, default_value = "5")]
         timeout: u64,
 
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
+        /// Output format (json)
+        #[arg(short = 'f', long, value_name = "FORMAT")]
+        format: Option<String>,
     },
 }
 
@@ -202,6 +205,10 @@ async fn main() -> Result<()> {
 
     // Handle subcommands
     match cli.command {
+        Some(Command::Serve) => {
+            // Start daemon
+            start_daemon(cli.log_level, cli.dns_port).await?;
+        }
         Some(Command::Convert { value, to }) => {
             commands::convert::run(value, to)?;
         }
@@ -249,13 +256,17 @@ async fn main() -> Result<()> {
             domain,
             server,
             timeout,
-            json,
+            format,
         }) => {
-            commands::resolve::run(domain, server, timeout, json).await?;
+            commands::resolve::run(domain, server, timeout, format).await?;
         }
         None => {
-            // Default: start daemon (backward compatible)
-            start_daemon(cli.log_level, cli.dns_port).await?;
+            // No subcommand provided - show help
+            eprintln!("Error: No subcommand provided");
+            eprintln!();
+            eprintln!("To start the daemon, use: iron serve");
+            eprintln!("For help, use: iron --help");
+            std::process::exit(1);
         }
     }
 

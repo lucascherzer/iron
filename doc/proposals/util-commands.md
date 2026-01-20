@@ -20,7 +20,6 @@ These utilities should work **without requiring root privileges** or starting th
 sudo iron [OPTIONS]
 
 # DNS management (requires root)
-sudo iron --setup-dns
 sudo iron --cleanup-dns
 ```
 

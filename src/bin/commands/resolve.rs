@@ -7,12 +7,14 @@ pub async fn run(
     domain: String,
     server: String,
     timeout_secs: u64,
-    json_output: bool,
+    format: Option<String>,
 ) -> Result<()> {
     // Validate it's a .iron domain
     if !domain.ends_with(".iron") {
         anyhow::bail!("Error: Not a .iron domain");
     }
+
+    let json_output = format.as_ref().map(|f| f.to_lowercase()) == Some("json".to_string());
 
     if !json_output {
         println!("\nQuerying {} for {}...", server, domain);
