@@ -331,7 +331,7 @@ async fn test_concurrent_packet_processing() {
     let registry = Arc::new(Registry::new());
 
     // Pre-register multiple endpoints
-    let endpoints: Vec<_> = (0..10).map(|i| test_endpoint_id(i)).collect();
+    let endpoints: Vec<_> = (0..10).map(test_endpoint_id).collect();
     let ipv6s: Vec<_> = endpoints
         .iter()
         .map(|e| registry.get_or_assign_ip(*e))
@@ -526,7 +526,7 @@ fn test_corrupted_key_file_detection() {
     let key_path = temp_dir.path().join("corrupted.key");
 
     // Write corrupted data (wrong size)
-    std::fs::write(&key_path, &[1, 2, 3, 4, 5]).unwrap();
+    std::fs::write(&key_path, [1, 2, 3, 4, 5]).unwrap();
 
     // Try to load - should fail
     let result = std::fs::read(&key_path).and_then(|bytes| {

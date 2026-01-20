@@ -5,6 +5,7 @@ See doc/arch.md for a general project description.
 We do a lot of vibe coding here, so simplicity of code style, appropriate,
 in-place documentation with optional references to other docs are imperative in
 order to avoid documentation going out-of-date when developing new features.
+
 Check the doc/ directory when making changes to reflect them.
 
 Agents should strive for: clean, sensibly deduplicated, testable code by
@@ -31,8 +32,10 @@ fn test_add() {
 # Code Style
 
 Agents with access to tools that allow them to execute a formatter should use
-them before submitting code for review. We use `rustfmt` with the default
-configuration, or one that is present in the repository.
+them before submitting code for review.
+Use `nix flake check` to ensure the repo is in a good state.
+Nix may not be available in zsh, try `/nix/var/nix/profiles/default/bin/nix`.
 
 # Project Management
-Agents persist their status on feature implementation in doc/plan.md in order to track progress.
+Agents persist their status on feature implementation in doc/plan.md in order to
+track progress.
