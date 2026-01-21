@@ -39,6 +39,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 data-encoding = "2.6"
 hex = "0.4"
 
+# Serialization
+postcard = { version = "1.0", features = ["alloc"] }
+
 # Cryptography
 rand = "0.9"
 
