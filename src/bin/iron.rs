@@ -293,6 +293,9 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     info!("Initializing iron node...");
     let node = IronNode::new().await?;
 
+    // Get a reference to the registry for saving on shutdown
+    let registry = node.registry().clone();
+
     // Display node information
     info!("Iron node initialized successfully");
     info!("");
@@ -365,6 +368,14 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
         error!("You may need to manually cleanup with: sudo iron --cleanup-dns");
     } else {
         info!("✓ DNS configuration removed");
+    }
+
+    // Save known peers for next startup
+    info!("Saving known peers...");
+    if let Err(e) = registry.save_peers() {
+        error!("Failed to save peers cache: {}", e);
+    } else {
+        info!("✓ Peers cache saved");
     }
 
     match shutdown_result {

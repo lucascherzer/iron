@@ -7,7 +7,7 @@ use anyhow::Result;
 use iroh::Endpoint;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct IronNode {
     registry: Arc<Registry>,
@@ -37,6 +37,13 @@ impl IronNode {
 
         // Create shared registry
         let registry = Arc::new(Registry::new());
+
+        // Load previously known peers to prevent issues with cached IPv6 addresses
+        match registry.load_peers() {
+            Ok(count) if count > 0 => info!("Loaded {} known peers from cache", count),
+            Ok(_) => info!("No cached peers found, starting fresh"),
+            Err(e) => warn!("Failed to load peers cache: {}", e),
+        }
 
         // Load or generate persistent secret key
         info!("Loading node identity");

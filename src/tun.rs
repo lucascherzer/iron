@@ -429,6 +429,11 @@ impl TunInterface {
                 "No EndpointId found for destination {}, dropping packet",
                 dest_addr
             );
+            warn!(
+                "This can happen if the destination IPv6 was cached by the application \
+                 but iron doesn't have the corresponding peer information. \
+                 Try accessing the peer by its .iron domain name to establish the mapping."
+            );
         }
 
         Ok(())

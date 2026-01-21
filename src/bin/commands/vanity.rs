@@ -244,7 +244,7 @@ pub fn run(
                     println!();
                     println!("Solutions:");
                     println!("1. Run iron daemon once (as root) to fix permissions:");
-                    println!("   sudo iron");
+                    println!("   sudo iron serve");
                     println!("   (then Ctrl-C and try vanity again)");
                     println!();
                     println!("2. Save to a custom location:");

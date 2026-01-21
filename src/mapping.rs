@@ -1,7 +1,8 @@
 use dashmap::DashMap;
 use iroh::EndpointId;
 use std::net::Ipv6Addr;
-use tracing::{debug, trace};
+use std::path::PathBuf;
+use tracing::{debug, trace, warn};
 
 /// Manages the bi-directional mapping between Iroh EndpointIds and IPv6 addresses.
 ///
@@ -113,6 +114,154 @@ impl Registry {
             u16::from_be_bytes([suffix[4], suffix[5]]),
             u16::from_be_bytes([suffix[6], suffix[7]]),
         )
+    }
+
+    /// Returns the path to the known peers file
+    ///
+    /// Stored in ~/.config/iron for persistence across restarts
+    fn known_peers_path() -> Result<PathBuf, std::io::Error> {
+        let home = std::env::var("HOME").map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "HOME environment variable not set",
+            )
+        })?;
+        Ok(PathBuf::from(home).join(".config/iron/known_peers.json"))
+    }
+
+    /// Saves known peer EndpointIds to disk for persistence across restarts
+    ///
+    /// This prevents the issue where applications cache IPv6 addresses but iron
+    /// loses the corresponding EndpointId mappings on restart.
+    ///
+    /// # Format
+    ///
+    /// Stores only EndpointIds in base32 encoding (same format as .iron domains).
+    /// IPv6 addresses are derived deterministically on load.
+    ///
+    /// Example:
+    /// ```json
+    /// [
+    ///   "rex7gp6zhc4g57hgjaq2hn5ch6xxixhxhqb74d6llmxmnrl2qeau",
+    ///   "sgclirglbav3rnznuqbemvyc2eaxxsxcxwge5jvedmdzyvuytsd5"
+    /// ]
+    /// ```
+    ///
+    /// # Security
+    ///
+    /// - File is stored in ~/.config/iron with 0600 permissions
+    /// - Only saves EndpointIds that were legitimately discovered (via DNS or incoming connections)
+    /// - Never "guesses" EndpointIds - only remembers verified peers
+    pub fn save_peers(&self) -> Result<(), std::io::Error> {
+        use std::fs;
+        use std::io::Write;
+
+        let peers_path = Self::known_peers_path()?;
+
+        // Ensure directory exists
+        if let Some(parent) = peers_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Collect all EndpointIds and encode as base32
+        let peers: Vec<String> = self
+            .endpoint_to_ip
+            .iter()
+            .map(|entry| {
+                // Encode EndpointId as base32 (same format as .iron domains)
+                data_encoding::BASE32_NOPAD
+                    .encode(entry.key().as_bytes())
+                    .to_lowercase()
+            })
+            .collect();
+
+        // Serialize to pretty JSON for human readability
+        let json = serde_json::to_string_pretty(&peers)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+
+        // Write atomically using temp file + rename
+        let temp_path = peers_path.with_extension("json.tmp");
+        let mut file = fs::File::create(&temp_path)?;
+
+        // Set restrictive permissions (0600 - owner read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata()?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&temp_path, perms)?;
+        }
+
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(temp_path, &peers_path)?;
+
+        debug!("Saved {} known peers to {:?}", peers.len(), peers_path);
+        Ok(())
+    }
+
+    /// Loads known peer EndpointIds from disk
+    ///
+    /// This is called at startup to restore previously discovered peers,
+    /// preventing issues with cached IPv6 addresses in applications.
+    ///
+    /// For each EndpointId, derives the corresponding IPv6 address and
+    /// populates the registry mappings.
+    pub fn load_peers(&self) -> Result<usize, std::io::Error> {
+        use std::fs;
+
+        let peers_path = Self::known_peers_path()?;
+
+        // If file doesn't exist, that's okay - just starting fresh
+        if !peers_path.exists() {
+            debug!("No known peers file found at {:?}", peers_path);
+            return Ok(0);
+        }
+
+        let contents = fs::read_to_string(&peers_path)?;
+
+        // Deserialize from JSON (array of base32-encoded EndpointIds)
+        let peer_ids: Vec<String> = serde_json::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+
+        let mut loaded = 0;
+        for peer_base32 in peer_ids {
+            // Decode base32 to bytes
+            let endpoint_bytes =
+                match data_encoding::BASE32_NOPAD.decode(peer_base32.to_uppercase().as_bytes()) {
+                    Ok(b) if b.len() == 32 => b,
+                    Ok(_) => {
+                        warn!("Invalid EndpointId length in known peers: {}", peer_base32);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Invalid base32 encoding in known peers: {} ({})",
+                            peer_base32, e
+                        );
+                        continue;
+                    }
+                };
+
+            let mut bytes_array = [0u8; 32];
+            bytes_array.copy_from_slice(&endpoint_bytes);
+
+            let endpoint_id = match EndpointId::from_bytes(&bytes_array) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!("Invalid EndpointId in known peers: {} ({})", peer_base32, e);
+                    continue;
+                }
+            };
+
+            // Use get_or_assign_ip to populate both mappings
+            // This ensures consistency and reuses existing logic
+            let _ipv6 = self.get_or_assign_ip(endpoint_id);
+            loaded += 1;
+        }
+
+        debug!("Loaded {} known peers from {:?}", loaded, peers_path);
+        Ok(loaded)
     }
 }
 

@@ -231,7 +231,7 @@ Iron provides a comprehensive CLI with the following commands:
 
 **Daemon Mode** (default):
 ```bash
-sudo iron                    # Start daemon with auto DNS setup
+sudo iron serve             # Start daemon with auto DNS setup
 sudo iron --dns-port 5353   # Use custom DNS port
 sudo iron --log-level debug # Enable debug logging
 sudo iron --cleanup-dns     # Cleanup DNS config and exit

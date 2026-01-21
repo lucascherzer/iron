@@ -17,7 +17,7 @@ These utilities should work **without requiring root privileges** or starting th
 
 ```bash
 # Main daemon (requires root)
-sudo iron [OPTIONS]
+sudo iron serve [OPTIONS]
 
 # DNS management (requires root)
 sudo iron --cleanup-dns
@@ -33,7 +33,7 @@ sudo iron --cleanup-dns
 
 ```bash
 # Main daemon (existing, requires root)
-sudo iron [OPTIONS]
+sudo iron serve [OPTIONS]
 
 # Utility subcommands (new, NO root required)
 iron convert <value>              # Convert between formats
@@ -574,7 +574,7 @@ iron vanity alice --save
 iron self
 
 # Start the daemon
-sudo iron
+sudo iron serve
 
 # (In another terminal) Test DNS
 iron resolve alice.iron
