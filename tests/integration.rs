@@ -148,7 +148,7 @@ async fn test_tun_os_to_network_packet_flow() {
         .expect("Packet sent to network channel");
 
     assert_eq!(recv_endpoint_id, endpoint_id);
-    assert_eq!(recv_packet, packet);
+    assert_eq!(recv_packet.as_bytes(), Some(packet.as_slice()));
 }
 
 /// Test two-node communication setup
@@ -245,7 +245,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
         to_network_rx_a.try_recv().expect("Packet sent to network");
 
     assert_eq!(dest_endpoint_id, endpoint_b);
-    assert_eq!(packet_bytes, packet_a_to_b);
+    assert_eq!(packet_bytes.as_bytes(), Some(packet_a_to_b.as_slice()));
 
     // Simulate: Iroh on Node B receives packet from Node A
     // (In real implementation, iroh would verify source and forward to TUN)

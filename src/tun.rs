@@ -1,4 +1,5 @@
 use crate::mapping::Registry;
+use crate::packet::Packet;
 use anyhow::{Context, Result};
 use etherparse::{Ipv6Header, TcpHeader};
 use futures::StreamExt;
@@ -18,12 +19,12 @@ use tun::{AsyncDevice, Configuration, Layer};
 /// 2. OS writes packet to TUN device
 /// 3. We read from TUN, parse destination IPv6
 /// 4. Lookup EndpointId from IPv6 in registry
-/// 5. Send (EndpointId, packet) to iroh via `to_network_tx`
+/// 5. Send (EndpointId, Packet) to iroh via `to_network_tx`
 ///
 /// **Network → OS (Inbound from peers):**
 /// 1. Iroh receives packet from peer (knows sender EndpointId)
 /// 2. Protocol layer rewrites source IPv6 to sender's derived IPv6
-/// 3. Send packet via `from_network_rx`
+/// 3. Send Packet via `from_network_rx`
 /// 4. We write packet to TUN device
 /// 5. OS routes to listening application
 pub struct TunInterface {
@@ -31,11 +32,11 @@ pub struct TunInterface {
     /// This node's derived IPv6 address (used for TUN configuration)
     node_ipv6: Ipv6Addr,
     /// Channel for sending packets TO network (OS → iroh)
-    /// Format: (destination_endpoint_id, raw_packet_bytes)
-    to_network_tx: mpsc::UnboundedSender<(EndpointId, Vec<u8>)>,
+    /// Format: (destination_endpoint_id, Packet)
+    to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
     /// Channel for receiving packets FROM network (iroh → OS)
-    /// Format: raw_packet_bytes (with correct source IPv6 already set)
-    from_network_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Format: Packet (with correct source IPv6 already set)
+    from_network_rx: mpsc::UnboundedReceiver<Packet>,
 }
 
 impl TunInterface {
@@ -45,13 +46,13 @@ impl TunInterface {
     ///
     /// * `registry` - Shared registry for IPv6 <-> EndpointId mapping
     /// * `node_ipv6` - This node's derived IPv6 address
-    /// * `to_network_tx` - Channel sender for packets going to iroh peers
-    /// * `from_network_rx` - Channel receiver for packets coming from iroh peers
+    /// * `to_network_tx` - Channel sender for Packets going to iroh peers
+    /// * `from_network_rx` - Channel receiver for Packets coming from iroh peers
     pub fn new(
         registry: Arc<Registry>,
         node_ipv6: Ipv6Addr,
-        to_network_tx: mpsc::UnboundedSender<(EndpointId, Vec<u8>)>,
-        from_network_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
+        from_network_rx: mpsc::UnboundedReceiver<Packet>,
     ) -> Self {
         info!("Creating TUN interface with IPv6: {}", node_ipv6);
         Self {
@@ -341,12 +342,15 @@ impl TunInterface {
                     debug!("Received packet from network, writing to TUN ({} bytes)", packet.len());
 
                     // Inspect packet for debugging
-                    if let Err(e) = Self::inspect_packet(&packet, "Network→OS") {
-                        trace!("Failed to inspect packet: {}", e);
-                    }
+                    if let Some(packet_bytes) = packet.as_bytes()
+                        && let Err(e) = Self::inspect_packet(packet_bytes, "Network→OS") {
+                            trace!("Failed to inspect packet: {}", e);
+                        }
 
                     use futures::SinkExt;
-                    if let Err(e) = framed.send(packet).await {
+                    // Extract raw bytes from Packet
+                    let packet_bytes = packet.into_bytes();
+                    if let Err(e) = framed.send(packet_bytes).await {
                         error!("Failed to write packet to TUN: {}", e);
                     } else {
                         debug!("Successfully wrote packet to TUN");
@@ -422,7 +426,7 @@ impl TunInterface {
 
             // Send to network layer (iroh will handle actual transmission)
             self.to_network_tx
-                .send((endpoint_id, packet.to_vec()))
+                .send((endpoint_id, Packet::raw(packet.to_vec())))
                 .context("Failed to send packet to network layer")?;
         } else {
             warn!(
@@ -553,7 +557,7 @@ mod tests {
         assert!(received.is_ok());
         let (recv_endpoint_id, recv_packet) = received.unwrap();
         assert_eq!(recv_endpoint_id, endpoint_id);
-        assert_eq!(recv_packet, packet);
+        assert_eq!(recv_packet.as_bytes(), Some(packet.as_slice()));
     }
 
     #[tokio::test]

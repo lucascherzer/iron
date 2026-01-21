@@ -1,4 +1,5 @@
 use crate::mapping::Registry;
+use crate::packet::Packet;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use iroh::{Endpoint, EndpointId, Watcher};
@@ -15,15 +16,15 @@ const MAX_PACKET_SIZE: usize = 1500;
 /// Iroh protocol handler for packet transport
 ///
 /// This component bridges TUN interface and iroh QUIC connections:
-/// - **Send**: Receives (EndpointId, packet) from TUN, sends via QUIC with connection pooling
-/// - **Receive**: Accepts QUIC connections, forwards packets to TUN
+/// - **Send**: Receives (EndpointId, Packet) from TUN, sends via QUIC with connection pooling
+/// - **Receive**: Accepts QUIC connections, forwards Packets to TUN
 pub struct IronProtocol {
     registry: Arc<Registry>,
     endpoint: Endpoint,
     /// Receives packets from TUN to send to peers
-    to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Vec<u8>)>,
+    to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Packet)>,
     /// Sends received packets to TUN
-    from_network_tx: mpsc::UnboundedSender<Vec<u8>>,
+    from_network_tx: mpsc::UnboundedSender<Packet>,
     /// Connection pool: maps EndpointId -> Connection for reuse
     connection_pool: Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
 }
@@ -33,8 +34,8 @@ impl IronProtocol {
     pub fn new(
         registry: Arc<Registry>,
         endpoint: Endpoint,
-        to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Vec<u8>)>,
-        from_network_tx: mpsc::UnboundedSender<Vec<u8>>,
+        to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Packet)>,
+        from_network_tx: mpsc::UnboundedSender<Packet>,
     ) -> Self {
         info!("Creating protocol handler for endpoint {}", endpoint.id());
         Self {
@@ -108,7 +109,7 @@ impl IronProtocol {
     ///
     /// Uses connection pooling to reuse existing connections when possible,
     /// avoiding repeated handshakes.
-    async fn send_packet(&self, dest: &EndpointId, packet: &[u8]) -> Result<()> {
+    async fn send_packet(&self, dest: &EndpointId, packet: &Packet) -> Result<()> {
         // Try to get existing connection from pool
         let conn = if let Some(cached_conn) = self.connection_pool.get(dest) {
             trace!("Reusing cached connection to {}", dest);
@@ -184,8 +185,9 @@ impl IronProtocol {
             }
         };
 
-        // Write packet data
-        send.write_all(packet)
+        // Write packet data (extract raw bytes)
+        let packet_bytes = packet.as_bytes().context("Packet has no raw bytes")?;
+        send.write_all(packet_bytes)
             .await
             .context("Failed to write packet data")?;
 
@@ -200,7 +202,7 @@ impl IronProtocol {
     async fn accept_loop(
         endpoint: Endpoint,
         registry: Arc<Registry>,
-        from_network_tx: mpsc::UnboundedSender<Vec<u8>>,
+        from_network_tx: mpsc::UnboundedSender<Packet>,
     ) -> Result<()> {
         info!("Starting accept loop on {}", endpoint.id());
 
@@ -269,7 +271,7 @@ impl IronProtocol {
         conn: iroh::endpoint::Connection,
         sender_id: EndpointId,
         registry: Arc<Registry>,
-        from_network_tx: mpsc::UnboundedSender<Vec<u8>>,
+        from_network_tx: mpsc::UnboundedSender<Packet>,
     ) -> Result<()> {
         debug!(
             "Handling connection from {}, accepting streams...",
@@ -319,8 +321,8 @@ impl IronProtocol {
                 };
 
             trace!("Forwarding packet to TUN with rewritten source");
-            // Forward packet to TUN
-            if let Err(e) = from_network_tx.send(packet_with_correct_source) {
+            // Forward packet to TUN (wrap in Packet type)
+            if let Err(e) = from_network_tx.send(Packet::raw(packet_with_correct_source)) {
                 error!("Failed to send packet to TUN: {}", e);
                 break; // TUN channel closed, exit
             }
