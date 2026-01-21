@@ -373,3 +373,399 @@ impl IronProtocol {
         Ok(new_packet)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh::SecretKey;
+    use std::net::Ipv6Addr;
+
+    /// Helper to create test EndpointIds
+    fn test_endpoint_id(seed: u8) -> EndpointId {
+        let secret = SecretKey::from_bytes(&[seed; 32]);
+        secret.public()
+    }
+
+    /// Helper to create a minimal valid IPv6 packet
+    fn create_ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr, payload_size: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; 40 + payload_size];
+        packet[0] = 0x60; // Version 6
+        packet[4] = (payload_size >> 8) as u8; // Payload length high byte
+        packet[5] = (payload_size & 0xFF) as u8; // Payload length low byte
+        packet[6] = 59; // No next header
+        packet[7] = 64; // Hop limit
+
+        // Source address
+        packet[8..24].copy_from_slice(&src.octets());
+        // Destination address
+        packet[24..40].copy_from_slice(&dst.octets());
+
+        // Add some payload if requested
+        for i in 0..payload_size {
+            packet[40 + i] = (i % 256) as u8;
+        }
+
+        packet
+    }
+
+    #[test]
+    fn test_alpn_constant() {
+        assert_eq!(ALPN, b"iron/packet/0");
+        assert_eq!(ALPN.len(), 13);
+    }
+
+    #[test]
+    fn test_max_packet_size_constant() {
+        assert_eq!(MAX_PACKET_SIZE, 1500);
+    }
+
+    #[test]
+    fn test_rewrite_source_address_valid_packet() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(42);
+        let expected_sender_ipv6 = registry.get_or_assign_ip(sender_id);
+
+        // Create packet with arbitrary source/destination
+        let original_src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+        let packet = create_ipv6_packet(original_src, dst, 0);
+
+        // Rewrite source address
+        let result = IronProtocol::rewrite_source_address(packet, &sender_id, &registry);
+        assert!(result.is_ok(), "Should successfully rewrite source address");
+
+        let rewritten_packet = result.unwrap();
+
+        // Parse the rewritten packet to verify source was changed
+        use etherparse::Ipv6Header;
+        let (header, _) = Ipv6Header::from_slice(&rewritten_packet).unwrap();
+
+        assert_eq!(
+            Ipv6Addr::from(header.source),
+            expected_sender_ipv6,
+            "Source should be rewritten to sender's derived IPv6"
+        );
+        assert_eq!(
+            Ipv6Addr::from(header.destination),
+            dst,
+            "Destination should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_source_address_preserves_payload() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(99);
+
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+        let payload_size = 100;
+        let packet = create_ipv6_packet(src, dst, payload_size);
+
+        // Original payload - clone to avoid borrow issues
+        let original_payload = packet[40..].to_vec();
+
+        let rewritten_packet =
+            IronProtocol::rewrite_source_address(packet, &sender_id, &registry).unwrap();
+
+        // Check payload is preserved
+        let rewritten_payload = &rewritten_packet[40..];
+        assert_eq!(
+            original_payload.as_slice(),
+            rewritten_payload,
+            "Payload should be preserved exactly"
+        );
+        assert_eq!(
+            rewritten_payload.len(),
+            payload_size,
+            "Payload size should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_source_address_with_large_payload() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(77);
+
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+        let payload_size = 1460; // Max for 1500 MTU
+        let packet = create_ipv6_packet(src, dst, payload_size);
+
+        assert_eq!(
+            packet.len(),
+            40 + payload_size,
+            "Packet should be exactly MTU size"
+        );
+
+        let result = IronProtocol::rewrite_source_address(packet, &sender_id, &registry);
+        assert!(result.is_ok(), "Should handle max MTU packets");
+
+        let rewritten = result.unwrap();
+        assert_eq!(
+            rewritten.len(),
+            40 + payload_size,
+            "Rewritten packet size should match original"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_source_address_invalid_packet() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(1);
+
+        // Packet too small to be valid IPv6
+        let invalid_packet = vec![0x60, 0x00, 0x00]; // Only 3 bytes
+
+        let result = IronProtocol::rewrite_source_address(invalid_packet, &sender_id, &registry);
+        assert!(
+            result.is_err(),
+            "Should fail on malformed packet (too small)"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_source_address_non_ipv6_packet() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(1);
+
+        // Valid size but wrong version (IPv4 = 0x40)
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x40; // IPv4 version
+
+        let result = IronProtocol::rewrite_source_address(packet, &sender_id, &registry);
+        assert!(result.is_err(), "Should fail on non-IPv6 packet");
+    }
+
+    #[test]
+    fn test_rewrite_source_address_different_senders() {
+        let registry = Arc::new(Registry::new());
+        let sender1 = test_endpoint_id(10);
+        let sender2 = test_endpoint_id(20);
+
+        let expected_ipv6_1 = registry.get_or_assign_ip(sender1);
+        let expected_ipv6_2 = registry.get_or_assign_ip(sender2);
+
+        // Create same packet structure
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+        let packet1 = create_ipv6_packet(src, dst, 0);
+        let packet2 = create_ipv6_packet(src, dst, 0);
+
+        let rewritten1 =
+            IronProtocol::rewrite_source_address(packet1, &sender1, &registry).unwrap();
+        let rewritten2 =
+            IronProtocol::rewrite_source_address(packet2, &sender2, &registry).unwrap();
+
+        use etherparse::Ipv6Header;
+        let (header1, _) = Ipv6Header::from_slice(&rewritten1).unwrap();
+        let (header2, _) = Ipv6Header::from_slice(&rewritten2).unwrap();
+
+        assert_eq!(Ipv6Addr::from(header1.source), expected_ipv6_1);
+        assert_eq!(Ipv6Addr::from(header2.source), expected_ipv6_2);
+        assert_ne!(
+            expected_ipv6_1, expected_ipv6_2,
+            "Different senders should get different source IPs"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_source_address_preserves_header_fields() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(55);
+
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+
+        // Create packet with specific header values
+        let mut packet = create_ipv6_packet(src, dst, 50);
+        packet[6] = 6; // TCP next header
+        packet[7] = 32; // Custom hop limit
+
+        let rewritten =
+            IronProtocol::rewrite_source_address(packet, &sender_id, &registry).unwrap();
+
+        use etherparse::Ipv6Header;
+        let (header, _) = Ipv6Header::from_slice(&rewritten).unwrap();
+
+        assert_eq!(
+            header.next_header.0, 6,
+            "Next header should be preserved (TCP)"
+        );
+        assert_eq!(header.hop_limit, 32, "Hop limit should be preserved");
+        assert_eq!(
+            header.payload_length, 50,
+            "Payload length should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_source_address_idempotent() {
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(88);
+        let sender_ipv6 = registry.get_or_assign_ip(sender_id);
+
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+        let packet = create_ipv6_packet(src, dst, 10);
+
+        // Rewrite once
+        let rewritten1 =
+            IronProtocol::rewrite_source_address(packet, &sender_id, &registry).unwrap();
+
+        // Rewrite the already-rewritten packet again
+        let rewritten2 =
+            IronProtocol::rewrite_source_address(rewritten1.clone(), &sender_id, &registry)
+                .unwrap();
+
+        use etherparse::Ipv6Header;
+        let (header1, _) = Ipv6Header::from_slice(&rewritten1).unwrap();
+        let (header2, _) = Ipv6Header::from_slice(&rewritten2).unwrap();
+
+        assert_eq!(
+            Ipv6Addr::from(header1.source),
+            Ipv6Addr::from(header2.source)
+        );
+        assert_eq!(Ipv6Addr::from(header1.source), sender_ipv6);
+        assert_eq!(rewritten1, rewritten2, "Rewriting should be idempotent");
+    }
+
+    #[tokio::test]
+    async fn test_protocol_construction() {
+        let registry = Arc::new(Registry::new());
+        let secret = SecretKey::generate(&mut rand::rng());
+        let endpoint = Endpoint::builder()
+            .secret_key(secret)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("Failed to create endpoint");
+
+        let (_to_network_tx, to_network_rx) = mpsc::unbounded_channel();
+        let (from_network_tx, _from_network_rx) = mpsc::unbounded_channel();
+
+        let protocol = IronProtocol::new(registry, endpoint, to_network_rx, from_network_tx);
+
+        // Verify construction doesn't panic
+        assert_eq!(
+            protocol.connection_pool.len(),
+            0,
+            "Connection pool should start empty"
+        );
+    }
+
+    #[test]
+    fn test_connection_pool_operations() {
+        // Test DashMap operations that would be used in connection pooling
+        let pool: DashMap<EndpointId, String> = DashMap::new();
+        let endpoint1 = test_endpoint_id(1);
+        let endpoint2 = test_endpoint_id(2);
+
+        // Insert
+        pool.insert(endpoint1, "conn1".to_string());
+        assert_eq!(pool.len(), 1);
+
+        // Get
+        assert!(pool.get(&endpoint1).is_some());
+        assert!(pool.get(&endpoint2).is_none());
+
+        // Remove
+        pool.remove(&endpoint1);
+        assert_eq!(pool.len(), 0);
+        assert!(pool.get(&endpoint1).is_none());
+    }
+
+    #[test]
+    fn test_connection_pool_concurrent_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let pool: Arc<DashMap<EndpointId, usize>> = Arc::new(DashMap::new());
+        let mut handles = vec![];
+
+        // Spawn 10 threads inserting different endpoints
+        for i in 0..10 {
+            let pool = Arc::clone(&pool);
+            let handle = thread::spawn(move || {
+                let endpoint = test_endpoint_id(i as u8);
+                pool.insert(endpoint, i);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(pool.len(), 10, "All insertions should succeed concurrently");
+    }
+
+    #[test]
+    fn test_packet_size_boundaries() {
+        // Test packets at various size boundaries
+        let test_cases = [
+            (0, "Empty payload"),
+            (1, "Single byte"),
+            (100, "Small packet"),
+            (1460, "Max TCP payload (1500 MTU - 40 IPv6)"),
+            (1500, "At MAX_PACKET_SIZE boundary"),
+        ];
+
+        let registry = Arc::new(Registry::new());
+        let sender_id = test_endpoint_id(33);
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+
+        for (payload_size, description) in test_cases.iter() {
+            let packet = create_ipv6_packet(src, dst, *payload_size);
+            let result = IronProtocol::rewrite_source_address(packet, &sender_id, &registry);
+
+            assert!(
+                result.is_ok(),
+                "Should handle packet with {}: {}",
+                payload_size,
+                description
+            );
+
+            let rewritten = result.unwrap();
+            assert_eq!(
+                rewritten.len(),
+                40 + payload_size,
+                "Packet size should be preserved for {}",
+                description
+            );
+        }
+    }
+
+    #[test]
+    fn test_registry_integration_in_rewrite() {
+        // Test that source rewriting properly integrates with Registry's deterministic mapping
+        let registry = Arc::new(Registry::new());
+        let sender = test_endpoint_id(123);
+
+        // Pre-register the sender in registry
+        let pre_registered_ipv6 = registry.get_or_assign_ip(sender);
+
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+        let packet = create_ipv6_packet(src, dst, 0);
+
+        let rewritten = IronProtocol::rewrite_source_address(packet, &sender, &registry).unwrap();
+
+        use etherparse::Ipv6Header;
+        let (header, _) = Ipv6Header::from_slice(&rewritten).unwrap();
+
+        assert_eq!(
+            Ipv6Addr::from(header.source),
+            pre_registered_ipv6,
+            "Should use pre-registered IPv6 from registry"
+        );
+
+        // Verify it's still in the registry and consistent
+        let post_rewrite_ipv6 = registry.get_or_assign_ip(sender);
+        assert_eq!(
+            pre_registered_ipv6, post_rewrite_ipv6,
+            "Registry mapping should remain consistent"
+        );
+    }
+}

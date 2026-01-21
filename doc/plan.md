@@ -7,9 +7,26 @@
 - ✅ Phase 4: Complete - TUN interface with IPv6 packet handling
 - ✅ Phase 5: Complete - Iroh integration with packet transport protocol
 - ✅ Phase 6: Complete - CLI & Orchestration with graceful shutdown
-- ✅ Integration Tests: Complete - 10 comprehensive integration tests
+- ✅ Integration Tests: Complete - 16 comprehensive integration tests
+- ✅ **Protocol Module Tests**: 15 unit tests for critical path (source rewriting, packet handling)
 - ✅ **TUN Device Fix**: IPv6 configuration and routing now working
 - 🎉 **PROJECT COMPLETE** - All phases implemented and tested!
+- 📊 **Test Coverage**: 67 total tests (51 unit tests + 16 integration tests)
+
+## Recent Updates (Jan 21, 2026)
+
+### ✅ Protocol Module Test Coverage - COMPLETE!
+- **Added 15 comprehensive unit tests** to `src/protocol.rs` (previously had ZERO tests)
+- **Critical path coverage** for the most important module in the codebase
+- **Tests focus on**:
+  - Source address rewriting (9 tests covering valid/invalid packets, payload preservation, idempotency)
+  - Packet size boundaries (empty to 1500 byte MTU)
+  - Connection pool operations (concurrent access, insert/remove)
+  - Protocol construction and initialization
+  - Registry integration with packet rewriting
+- **All tests pass** and can run in CI without requiring root or two-node setup
+- **Test count increased** from 52 to 67 tests (+29% increase)
+- **Files Modified**: `src/protocol.rs` (added comprehensive test module)
 
 ## Recent Updates (Jan 19, 2026)
 
