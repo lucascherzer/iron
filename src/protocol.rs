@@ -9,7 +9,7 @@ use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, trace, warn};
 
 /// ALPN protocol identifier for iron packet transport
-pub const ALPN: &[u8] = b"iron/packet/0";
+pub const ALPN: &[u8] = b"iron/packet/1";
 
 /// Maximum packet size (MTU)
 const MAX_PACKET_SIZE: usize = 1500;
@@ -569,6 +569,14 @@ impl IronProtocol {
                     // Extract destination port from packet (returns None for non-TCP/UDP like ICMP)
                     let dst_port = Self::extract_dst_port(&packet);
 
+                    trace!(
+                        "Extracted destination port from {}: {}",
+                        sender_id,
+                        dst_port
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "none (ICMP/other)".to_string())
+                    );
+
                     // If we have a destination port, check policy
                     // If packet has no port (e.g., ICMP), use port 0 as a sentinel
                     let port_to_check = dst_port.unwrap_or(0);
@@ -595,6 +603,8 @@ impl IronProtocol {
                             "N/A".to_string()
                         }
                     );
+                } else {
+                    trace!("Firewall disabled, allowing packet from {}", sender_id);
                 }
             }
 

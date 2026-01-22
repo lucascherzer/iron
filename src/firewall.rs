@@ -472,8 +472,14 @@ impl FirewallPolicy {
         dst_port: u16,
         config: &FirewallConfig,
     ) -> bool {
+        use tracing::trace;
+
         // Check source match
         if !self.source.matches(device, person, config) {
+            trace!(
+                "Policy source {:?} does not match device {}",
+                self.source, device
+            );
             return false;
         }
 
@@ -481,10 +487,18 @@ impl FirewallPolicy {
         if let Some(port_range) = &self.dst_port
             && !port_range.matches(dst_port)
         {
+            trace!(
+                "Policy port range {:?} does not match port {}",
+                port_range, dst_port
+            );
             return false;
         }
 
         // All conditions match
+        trace!(
+            "Policy matched: source={:?}, port={:?}",
+            self.source, self.dst_port
+        );
         true
     }
 }
@@ -547,25 +561,54 @@ impl FirewallConfig {
     /// Check if a packet is allowed based on policies
     /// Returns true if any policy matches, or if no policies are configured (backward compat)
     pub fn is_packet_allowed(&self, device_key: &DeviceKey, dst_port: u16) -> bool {
+        use tracing::{debug, trace};
+
         if !self.enabled {
+            trace!("Firewall disabled, allowing packet");
             return true; // Firewall disabled, allow all
         }
 
         // If no policies configured, fall back to device verification only
         if self.policies.is_empty() {
-            return self.is_device_allowed(device_key);
+            let allowed = self.is_device_allowed(device_key);
+            debug!(
+                "No policies configured, falling back to device verification: {} -> {}",
+                device_key,
+                if allowed { "allowed" } else { "blocked" }
+            );
+            return allowed;
         }
 
         // Get the person key for this device (if verified)
         let person_key = self.verified_devices.get(device_key);
 
+        trace!(
+            "Checking {} policies for device {} (port {}), person_key={}",
+            self.policies.len(),
+            device_key,
+            dst_port,
+            if person_key.is_some() {
+                "verified"
+            } else {
+                "unverified"
+            }
+        );
+
         // Check if any policy matches
-        for policy in &self.policies {
+        for (idx, policy) in self.policies.iter().enumerate() {
             if policy.matches(device_key, person_key, dst_port, self) {
+                debug!(
+                    "Packet allowed by policy #{}: {:?} from {:?} on port {:?}",
+                    idx, policy.action, policy.source, policy.dst_port
+                );
                 return true;
             }
         }
 
+        debug!(
+            "Packet blocked: no matching policy (checked {} policies)",
+            self.policies.len()
+        );
         false
     }
 
