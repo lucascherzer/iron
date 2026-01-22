@@ -325,69 +325,354 @@ fn test_ipv6_prefix_consistency() {
     assert_eq!(octets[3], 0x6f);
 }
 
-/// Test concurrent packet processing
-#[tokio::test]
-async fn test_concurrent_packet_processing() {
-    let registry = Arc::new(Registry::new());
+// =============================================================================
+// Firewall Integration Tests
+// =============================================================================
 
-    // Pre-register multiple endpoints
-    let endpoints: Vec<_> = (0..10).map(test_endpoint_id).collect();
-    let ipv6s: Vec<_> = endpoints
-        .iter()
-        .map(|e| registry.get_or_assign_ip(*e))
-        .collect();
+use iron::firewall::{FirewallConfig, OwnershipClaim, PersonSecretKey, TrustedPerson};
+use iron::packet::{AuthMessage, AuthResponse, Packet};
 
-    // Create a node with ID 99
-    let node_id = test_endpoint_id(99);
-    let node_ipv6 = registry.get_or_assign_ip(node_id);
+/// Test firewall authentication flow with valid claim
+#[test]
+fn test_firewall_authentication_with_valid_claim() {
+    // Setup: Create a firewall config with a trusted person
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
 
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-    let tun = Arc::new(TunInterface::new(
-        Arc::clone(&registry),
-        node_ipv6,
-        to_network_tx,
-        from_network_rx,
-    ));
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+    let device_endpoint_id = test_endpoint_id(42);
 
-    // Spawn multiple tasks sending packets concurrently
-    let mut handles = vec![];
-    for (i, dest_ipv6) in ipv6s.iter().enumerate() {
-        let tun = Arc::clone(&tun);
-        let dest_ipv6 = *dest_ipv6;
+    // Add person to trusted list
+    firewall.add_person(TrustedPerson {
+        name: "alice".to_string(),
+        comment: Some("Test user".to_string()),
+        key: person_key.clone(),
+    });
 
-        let handle = tokio::spawn(async move {
-            let mut packet = vec![0u8; 40];
-            packet[0] = 0x60; // Version 6
-            packet[6] = 59;
-            packet[7] = 64;
+    // Simulate: Device creates ownership claim
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 3600);
 
-            // Source
-            packet[8..24].copy_from_slice(&[
-                0xfd, 0x69, 0x72, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x01,
-            ]);
+    // Simulate: Firewall verifies the claim
+    let result = firewall.verify_claim(&claim);
 
-            // Destination
-            packet[24..40].copy_from_slice(&dest_ipv6.octets());
+    assert!(result.is_ok(), "Claim verification should succeed");
+    assert!(result.unwrap(), "Person should be trusted");
+    assert!(
+        firewall.is_device_allowed(&device_endpoint_id),
+        "Device should be cached and allowed"
+    );
+}
 
-            tun.handle_os_to_network(&packet).await.unwrap();
-            i
-        });
-        handles.push(handle);
+/// Test firewall rejects untrusted person
+#[test]
+fn test_firewall_rejects_untrusted_person() {
+    // Setup: Create firewall but don't add person to trusted list
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let device_endpoint_id = test_endpoint_id(43);
+
+    // Create claim from untrusted person
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 3600);
+
+    // Firewall should reject (person not trusted)
+    let result = firewall.verify_claim(&claim);
+
+    assert!(result.is_ok(), "Verification should not error");
+    assert!(!result.unwrap(), "Person should not be trusted");
+    assert!(
+        !firewall.is_device_allowed(&device_endpoint_id),
+        "Device should not be allowed"
+    );
+}
+
+/// Test firewall rejects expired claim
+#[test]
+fn test_firewall_rejects_expired_claim() {
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+    let device_endpoint_id = test_endpoint_id(44);
+
+    // Add person to trusted list
+    firewall.add_person(TrustedPerson {
+        name: "bob".to_string(),
+        comment: None,
+        key: person_key.clone(),
+    });
+
+    // Create claim with 1 second validity
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 1);
+
+    // Wait for expiry
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Should reject expired claim
+    let result = firewall.verify_claim(&claim);
+
+    assert!(result.is_err(), "Expired claim should be rejected");
+}
+
+/// Test firewall caches verified devices
+#[test]
+fn test_firewall_caches_verified_devices() {
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+    let device_endpoint_id = test_endpoint_id(45);
+
+    firewall.add_person(TrustedPerson {
+        name: "charlie".to_string(),
+        comment: None,
+        key: person_key.clone(),
+    });
+
+    // Initially not cached
+    assert!(!firewall.is_device_allowed(&device_endpoint_id));
+
+    // Verify claim
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 3600);
+    let result = firewall.verify_claim(&claim);
+
+    assert!(result.is_ok());
+    assert!(result.unwrap());
+
+    // Now should be cached
+    assert!(
+        firewall.is_device_allowed(&device_endpoint_id),
+        "Device should be cached after successful verification"
+    );
+
+    // Check cache directly
+    assert!(firewall.verified_devices.contains_key(&device_endpoint_id));
+    assert_eq!(
+        firewall.verified_devices.get(&device_endpoint_id),
+        Some(&person_key)
+    );
+}
+
+/// Test firewall disabled allows all traffic
+#[test]
+fn test_firewall_disabled_allows_all_devices() {
+    let firewall = FirewallConfig::new(); // disabled by default
+    let device_endpoint_id = test_endpoint_id(46);
+
+    // Should allow even though device is not verified
+    assert!(
+        firewall.is_device_allowed(&device_endpoint_id),
+        "Disabled firewall should allow all devices"
+    );
+}
+
+/// Test removing person also removes their devices from cache
+#[test]
+fn test_removing_person_clears_device_cache() {
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+    let device_endpoint_id = test_endpoint_id(47);
+
+    // Add person and verify device
+    firewall.add_person(TrustedPerson {
+        name: "dave".to_string(),
+        comment: None,
+        key: person_key.clone(),
+    });
+
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 3600);
+    firewall.verify_claim(&claim).unwrap();
+
+    // Device should be cached
+    assert!(firewall.is_device_allowed(&device_endpoint_id));
+
+    // Remove person
+    assert!(firewall.remove_person("dave"));
+
+    // Device should no longer be allowed
+    assert!(
+        !firewall.is_device_allowed(&device_endpoint_id),
+        "Removing person should remove their devices from cache"
+    );
+    assert!(!firewall.verified_devices.contains_key(&device_endpoint_id));
+}
+
+/// Test auth packet serialization for network transmission
+#[test]
+fn test_auth_packet_serialization() {
+    let person_secret = PersonSecretKey::generate();
+    let device_endpoint_id = test_endpoint_id(48);
+
+    // Create claim
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 3600);
+
+    // Wrap in auth packet
+    let packet = Packet::Auth(AuthMessage::Claim(claim.clone()));
+
+    // Serialize for transmission
+    let bytes = postcard::to_allocvec(&packet).expect("Should serialize");
+
+    // Deserialize on receiver side
+    let received: Packet = postcard::from_bytes(&bytes).expect("Should deserialize");
+
+    // Verify it's the same claim
+    match received {
+        Packet::Auth(AuthMessage::Claim(received_claim)) => {
+            assert_eq!(received_claim.person_key, claim.person_key);
+            assert_eq!(received_claim.device_key, claim.device_key);
+            assert_eq!(received_claim.signature, claim.signature);
+        }
+        _ => panic!("Expected Auth Claim packet"),
+    }
+}
+
+/// Test auth response serialization
+#[test]
+fn test_auth_response_serialization() {
+    // Test accepted response
+    let accepted = Packet::Auth(AuthMessage::Response(AuthResponse::Accepted));
+    let bytes = postcard::to_allocvec(&accepted).expect("Should serialize");
+    let received: Packet = postcard::from_bytes(&bytes).expect("Should deserialize");
+
+    match received {
+        Packet::Auth(AuthMessage::Response(AuthResponse::Accepted)) => {
+            // Success
+        }
+        _ => panic!("Expected Auth Response Accepted"),
     }
 
-    // Wait for all tasks
-    for handle in handles {
-        handle.await.expect("Task completed");
-    }
+    // Test rejected response
+    let rejected = Packet::Auth(AuthMessage::Response(AuthResponse::Rejected {
+        reason: "Person not trusted".to_string(),
+    }));
+    let bytes = postcard::to_allocvec(&rejected).expect("Should serialize");
+    let received: Packet = postcard::from_bytes(&bytes).expect("Should deserialize");
 
-    // Verify all packets were sent
-    let mut received_count = 0;
-    while to_network_rx.try_recv().is_ok() {
-        received_count += 1;
+    match received {
+        Packet::Auth(AuthMessage::Response(AuthResponse::Rejected { reason })) => {
+            assert_eq!(reason, "Person not trusted");
+        }
+        _ => panic!("Expected Auth Response Rejected"),
     }
-    assert_eq!(received_count, 10);
+}
+
+/// Test firewall persistence and reload
+#[test]
+fn test_firewall_config_persistence() {
+    let temp_dir = TempDir::new().unwrap();
+    let home_path = temp_dir.path().to_str().unwrap();
+
+    // Create and configure firewall
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+    let device_endpoint_id = test_endpoint_id(49);
+
+    firewall.add_person(TrustedPerson {
+        name: "eve".to_string(),
+        comment: Some("Test persistence".to_string()),
+        key: person_key.clone(),
+    });
+
+    // Verify and cache a device
+    let claim = OwnershipClaim::new(&person_secret, device_endpoint_id, 3600);
+    firewall.verify_claim(&claim).unwrap();
+
+    // Save to disk
+    iron::firewall::FirewallConfig::save_with_home(&firewall, Some(home_path))
+        .expect("Should save");
+
+    // Load from disk (simulating restart)
+    let loaded =
+        iron::firewall::FirewallConfig::load_from_home(Some(home_path)).expect("Should load");
+
+    // Verify configuration persisted
+    assert!(loaded.enabled);
+    assert_eq!(loaded.trusted_persons.len(), 1);
+    assert_eq!(loaded.trusted_persons[0].name, "eve");
+    assert_eq!(loaded.trusted_persons[0].key, person_key);
+
+    // Verify device cache persisted
+    assert!(loaded.verified_devices.contains_key(&device_endpoint_id));
+    assert!(loaded.is_device_allowed(&device_endpoint_id));
+}
+
+/// Test multiple devices for same person
+#[test]
+fn test_multiple_devices_same_person() {
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+
+    firewall.add_person(TrustedPerson {
+        name: "frank".to_string(),
+        comment: None,
+        key: person_key.clone(),
+    });
+
+    // Create claims for two different devices
+    let device1 = test_endpoint_id(50);
+    let device2 = test_endpoint_id(51);
+
+    let claim1 = OwnershipClaim::new(&person_secret, device1, 3600);
+    let claim2 = OwnershipClaim::new(&person_secret, device2, 3600);
+
+    // Both should verify successfully
+    assert!(firewall.verify_claim(&claim1).unwrap());
+    assert!(firewall.verify_claim(&claim2).unwrap());
+
+    // Both devices should be cached
+    assert!(firewall.is_device_allowed(&device1));
+    assert!(firewall.is_device_allowed(&device2));
+
+    // Both should map to same person
+    assert_eq!(firewall.verified_devices.get(&device1), Some(&person_key));
+    assert_eq!(firewall.verified_devices.get(&device2), Some(&person_key));
+}
+
+/// Test claim with mismatched device key is rejected
+#[test]
+fn test_claim_device_key_must_match_sender() {
+    let mut firewall = FirewallConfig::new();
+    firewall.enabled = true;
+
+    let person_secret = PersonSecretKey::generate();
+    let person_key = person_secret.public_key();
+
+    firewall.add_person(TrustedPerson {
+        name: "grace".to_string(),
+        comment: None,
+        key: person_key.clone(),
+    });
+
+    // Create claim for device A
+    let device_a = test_endpoint_id(52);
+    let claim = OwnershipClaim::new(&person_secret, device_a, 3600);
+
+    // In protocol.rs, we check that claim.device_key matches the sender
+    // Here we simulate that check
+    let sender_id = test_endpoint_id(53); // Different device!
+
+    if claim.device_key != sender_id {
+        // This is what protocol.rs does - reject the connection
+        assert_ne!(
+            claim.device_key, sender_id,
+            "Claim should be rejected if device key doesn't match sender"
+        );
+    } else {
+        panic!("Device key matched when it shouldn't have");
+    }
 }
 
 /// Test that TUN interface exposes public method

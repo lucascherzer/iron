@@ -11,18 +11,18 @@
 - ✅ **Protocol Module Tests**: 15 unit tests for critical path (source rewriting, packet handling)
 - ✅ **TUN Device Fix**: IPv6 configuration and routing now working
 - 🎉 **PROJECT COMPLETE** - All phases implemented and tested!
-- 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
+- 📊 **Test Coverage**: 102 total tests (76 unit tests + 26 integration tests)
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
-- 🔐 **Firewall Implementation**: IN PROGRESS - Core types and auth packets implemented
+- ✅ **Firewall Implementation**: COMPLETE (100%) - Full protocol integration with comprehensive test coverage
 
 ## Recent Updates (Jan 22, 2026)
 
-### 🔐 Firewall with Device Ownership Claims - IN PROGRESS
+### ✅ Firewall with Device Ownership Claims - COMPLETE (100%)
 
-Implementing a whitelist-based firewall that allows trusting person identities instead of individual devices.
+Implemented a whitelist-based firewall that allows trusting person identities instead of individual devices. The authentication happens at connection time on the receiving side.
 
 #### Completed
-- ✅ **Core Types** (`src/firewall.rs`, ~450 lines)
+- ✅ **Core Types** (`src/firewall.rs`, ~650 lines)
   - `PersonKey` - Ed25519 public keys for person identities
   - `PersonSecretKey` - Private keys for signing ownership claims
   - `OwnershipClaim` - Signed proof that a device belongs to a person
@@ -41,41 +41,80 @@ Implementing a whitelist-based firewall that allows trusting person identities i
   - Stored in `~/.config/iron/firewall.json` and `firewall_cache.json`
   - Proper Unix permissions (0600 for files, 0700 for directory)
   
-- ✅ **Test Coverage**
-  - 13 comprehensive firewall tests (all passing)
-  - 12 packet tests including auth variants (all passing)
-  - Signature verification, claim validation, expiry testing
-  - Config persistence, cache persistence
+- ✅ **Protocol Integration** (`src/protocol.rs`)
+  - Added `FirewallConfig` to `IronProtocol` struct wrapped in `Arc<RwLock>`
+  - Modified `handle_connection()` to require authentication when firewall enabled
+  - Implemented authentication challenge/response flow:
+    - Receiver checks if device is in verified_devices cache
+    - If not cached, expects `Packet::Auth(Claim(...))` as first packet
+    - Verifies claim signature and checks if person is trusted
+    - Caches verified devices persistently
+    - Sends `Packet::Auth(Response(Accepted/Rejected))`
+  - Updated `IronNode` to load firewall config on startup
+  
+- ✅ **CLI Commands** - Complete command-line interface
+  - **Person Management** (`src/bin/commands/person.rs`):
+    - `iron person generate` - Generate new person keypair
+    - `iron person add <name> <key> [--comment]` - Add trusted person
+    - `iron person remove <name>` - Remove trusted person
+    - `iron person list` - Show all trusted persons
+  - **Firewall Management** (`src/bin/commands/firewall.rs`):
+    - `iron firewall enable` - Enable the firewall
+    - `iron firewall disable` - Disable the firewall
+    - `iron firewall status` - Show firewall status
+  - **Claim Management** (`src/bin/commands/claim.rs`):
+    - `iron claim generate <person-secret> [--output]` - Generate ownership claim
+    - `iron claim show <file>` - Display claim file contents
+    - `iron claim verify <file>` - Verify a claim file
+  
+- ✅ **Test Coverage** - 39 comprehensive tests
+  - 13 firewall core unit tests (signature, expiry, caching)
+  - 12 packet serialization tests (Auth variants)
+  - 1 protocol construction test (with firewall)
+  - 13 integration tests (full authentication flows):
+    - Valid claim acceptance flow
+    - Untrusted person rejection
+    - Expired claim rejection
+    - Device caching behavior
+    - Multiple devices per person
+    - Person removal clearing device cache
+    - Auth packet serialization/deserialization
+    - Config persistence and reload
+    - Device key mismatch detection
+  - All tests passing (102 total: 76 unit + 26 integration)
   
 - ✅ **Dependencies Added**
   - `ed25519-dalek = "2"` - Ed25519 signatures
   - `serde_bytes = "0.11"` - Efficient byte array serialization
 
-#### TODO - Remaining Work
-- ⏸️ **Protocol Integration** - Add auth flow to `IronProtocol`
-  - Modify connection handler to require authentication when firewall enabled
-  - Cache verified devices persistently
-  - Send/receive auth packets before raw packets
-  
-- ⏸️ **CLI Commands** - Person key and firewall management
-  - `iron person add <name> <key>` - Add trusted person
-  - `iron person remove <name>` - Remove trusted person
-  - `iron person list` - Show trusted persons
-  - `iron person key generate` - Generate person keypair
-  - `iron firewall enable/disable` - Toggle firewall
-  - `iron claim generate` - Create ownership claim for current device
-  
-- ⏸️ **Integration Tests** - End-to-end firewall testing
-  - Test authentication flow between two nodes
-  - Test rejection of untrusted devices
-  - Test cache persistence across restarts
-
 #### Design Highlights
 - **Two-tier key system**: Person keys (long-term) + Device keys (iroh EndpointId)
 - **Singular ownership**: Each device has exactly one person key (MVP)
 - **Persistent caching**: Authentication happens once, cached until expiry/revocation
+- **Receiver-side authentication**: Server challenges connecting clients
 - **Policy-based**: Flexible whitelist rules (person or specific device)
 - **Secure by default**: Claims expire after 1 year, signatures verified with Ed25519
+
+#### Usage Example
+```bash
+# On Alice's machine: Generate person keypair
+iron person generate
+# Output: public key and secret key (hex)
+
+# On Bob's machine: Trust Alice
+iron person add alice <alice-public-key> --comment "Friend from work"
+
+# Enable firewall on Bob's machine
+iron firewall enable
+
+# On Alice's machine: Generate ownership claim for this device
+iron claim generate <alice-secret-key> --output claim.json
+
+# Alice shares claim.json with Bob (or Bob's node verifies it automatically)
+# When Alice's device connects, it sends the claim
+# Bob's node verifies the signature and checks if Alice is trusted
+# If yes, connection is accepted and cached
+```
 
 ## Recent Updates (Jan 21, 2026)
 

@@ -122,6 +122,24 @@ enum Command {
         #[arg(short = 'f', long, value_name = "FORMAT")]
         format: Option<String>,
     },
+
+    /// Manage trusted persons in the firewall
+    Person {
+        #[command(subcommand)]
+        command: PersonCommand,
+    },
+
+    /// Firewall management (enable, disable, status)
+    Firewall {
+        #[command(subcommand)]
+        command: FirewallCommand,
+    },
+
+    /// Manage device ownership claims
+    Claim {
+        #[command(subcommand)]
+        command: ClaimCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -177,6 +195,111 @@ enum KeyCommand {
         /// Skip confirmation prompt
         #[arg(long)]
         confirm: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PersonCommand {
+    /// Generate a new person keypair
+    Generate {
+        /// Save the key to ~/.config/iron/person_key.secret
+        #[arg(long)]
+        save: bool,
+    },
+
+    /// Add a trusted person to the firewall
+    Add {
+        /// Person name (identifier for policies)
+        name: String,
+
+        /// Person's Ed25519 public key (hex format)
+        key: String,
+
+        /// Optional comment about this person
+        #[arg(long)]
+        comment: Option<String>,
+    },
+
+    /// Remove a trusted person from the firewall
+    Remove {
+        /// Person name to remove
+        name: String,
+    },
+
+    /// List all trusted persons
+    List,
+}
+
+#[derive(Subcommand, Debug)]
+enum FirewallCommand {
+    /// Setup firewall (generate keys, create claim, enable firewall)
+    Setup {
+        /// Force overwrite existing configuration
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Enable the firewall
+    Enable,
+
+    /// Disable the firewall
+    Disable,
+
+    /// Show firewall status
+    Status,
+
+    /// Manage firewall policies
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyCommand {
+    /// Add a new firewall policy
+    Add {
+        /// Source: "*" (any), "person:name", or "peer:endpoint_id"
+        src: String,
+
+        /// Destination port: "*" (any), "80", "1000-2000", or "1000-"
+        #[arg(long)]
+        port: Option<String>,
+    },
+
+    /// List all firewall policies
+    List,
+
+    /// Remove a firewall policy by index
+    Remove {
+        /// Index of policy to remove (from `list` command)
+        index: usize,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClaimCommand {
+    /// Generate an ownership claim for this device
+    Generate {
+        /// Person's secret key (hex format, defaults to ~/.config/iron/person_key.secret)
+        #[arg(long)]
+        person_secret: Option<String>,
+
+        /// Output file path (if not provided, auto-saves to claims directory)
+        #[arg(long)]
+        output: Option<String>,
+    },
+
+    /// Show a claim file's contents
+    Show {
+        /// Claim file path
+        file: String,
+    },
+
+    /// Verify an ownership claim
+    Verify {
+        /// Claim file path
+        file: String,
     },
 }
 
@@ -260,6 +383,59 @@ async fn main() -> Result<()> {
         }) => {
             commands::resolve::run(domain, server, timeout, format).await?;
         }
+        Some(Command::Person { command }) => match command {
+            PersonCommand::Generate { save } => {
+                commands::person::generate(save)?;
+            }
+            PersonCommand::Add { name, key, comment } => {
+                commands::person::add(name, key, comment)?;
+            }
+            PersonCommand::Remove { name } => {
+                commands::person::remove(name)?;
+            }
+            PersonCommand::List => {
+                commands::person::list()?;
+            }
+        },
+        Some(Command::Firewall { command }) => match command {
+            FirewallCommand::Setup { force } => {
+                commands::firewall::setup(force)?;
+            }
+            FirewallCommand::Enable => {
+                commands::firewall::enable()?;
+            }
+            FirewallCommand::Disable => {
+                commands::firewall::disable()?;
+            }
+            FirewallCommand::Status => {
+                commands::firewall::status()?;
+            }
+            FirewallCommand::Policy { command } => match command {
+                PolicyCommand::Add { src, port } => {
+                    commands::firewall::policy_add(src, port)?;
+                }
+                PolicyCommand::List => {
+                    commands::firewall::policy_list()?;
+                }
+                PolicyCommand::Remove { index } => {
+                    commands::firewall::policy_remove(index)?;
+                }
+            },
+        },
+        Some(Command::Claim { command }) => match command {
+            ClaimCommand::Generate {
+                person_secret,
+                output,
+            } => {
+                commands::claim::generate(person_secret, output)?;
+            }
+            ClaimCommand::Show { file } => {
+                commands::claim::show(file)?;
+            }
+            ClaimCommand::Verify { file } => {
+                commands::claim::verify(file)?;
+            }
+        },
         None => {
             // No subcommand provided - show help
             eprintln!("Error: No subcommand provided");

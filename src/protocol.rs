@@ -1,10 +1,11 @@
+use crate::firewall::FirewallConfig;
 use crate::mapping::Registry;
-use crate::packet::Packet;
+use crate::packet::{AuthMessage, AuthResponse, Packet};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use iroh::{Endpoint, EndpointId, Watcher};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, trace, warn};
 
 /// ALPN protocol identifier for iron packet transport
@@ -18,6 +19,7 @@ const MAX_PACKET_SIZE: usize = 1500;
 /// This component bridges TUN interface and iroh QUIC connections:
 /// - **Send**: Receives (EndpointId, Packet) from TUN, sends via QUIC with connection pooling
 /// - **Receive**: Accepts QUIC connections, forwards Packets to TUN
+/// - **Firewall**: Optionally authenticates devices using person ownership claims
 pub struct IronProtocol {
     registry: Arc<Registry>,
     endpoint: Endpoint,
@@ -27,6 +29,10 @@ pub struct IronProtocol {
     from_network_tx: mpsc::UnboundedSender<Packet>,
     /// Connection pool: maps EndpointId -> Connection for reuse
     connection_pool: Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
+    /// Firewall configuration (wrapped in RwLock for concurrent access and mutation)
+    firewall: Arc<RwLock<FirewallConfig>>,
+    /// Track connections we've successfully authenticated to (to avoid re-sending claims)
+    authenticated_to: Arc<DashMap<EndpointId, bool>>,
 }
 
 impl IronProtocol {
@@ -36,6 +42,7 @@ impl IronProtocol {
         endpoint: Endpoint,
         to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Packet)>,
         from_network_tx: mpsc::UnboundedSender<Packet>,
+        firewall: FirewallConfig,
     ) -> Self {
         info!("Creating protocol handler for endpoint {}", endpoint.id());
         Self {
@@ -44,6 +51,8 @@ impl IronProtocol {
             to_network_rx,
             from_network_tx,
             connection_pool: Arc::new(DashMap::new()),
+            firewall: Arc::new(RwLock::new(firewall)),
+            authenticated_to: Arc::new(DashMap::new()),
         }
     }
 
@@ -56,10 +65,11 @@ impl IronProtocol {
         let endpoint = self.endpoint.clone();
         let from_network_tx = self.from_network_tx.clone();
         let registry = self.registry.clone();
+        let firewall = self.firewall.clone();
 
         // Spawn accept loop to handle incoming connections
         let accept_handle = tokio::spawn(async move {
-            if let Err(e) = Self::accept_loop(endpoint, registry, from_network_tx).await {
+            if let Err(e) = Self::accept_loop(endpoint, registry, from_network_tx, firewall).await {
                 error!("Accept loop failed: {}", e);
             }
         });
@@ -151,6 +161,17 @@ impl IronProtocol {
             }
 
             info!("Successfully connected to {} and cached connection", dest);
+
+            // Try to authenticate if we have a claim (ignore failures - peer might not have firewall enabled)
+            if let Err(e) = self.try_authenticate(&new_conn, dest).await {
+                debug!(
+                    "Authentication to {} failed (peer might not require it): {}",
+                    dest, e
+                );
+                // Don't fail the connection - peer might not have firewall enabled
+                // The actual data packet send will fail if authentication was required
+            }
+
             new_conn
         };
 
@@ -178,6 +199,19 @@ impl IronProtocol {
 
                 self.connection_pool.insert(*dest, new_conn.clone());
 
+                // Try to authenticate
+                match self.try_authenticate(&new_conn, dest).await {
+                    Ok(_) => {
+                        debug!("Authentication successful or not required");
+                    }
+                    Err(e) => {
+                        warn!("Authentication to {} failed: {}", dest, e);
+                        // Remove from pool since authentication failed
+                        self.connection_pool.remove(dest);
+                        return Err(e).context("Failed to authenticate to peer");
+                    }
+                }
+
                 new_conn
                     .open_bi()
                     .await
@@ -198,11 +232,79 @@ impl IronProtocol {
         Ok(())
     }
 
+    /// Try to authenticate to a peer by sending our ownership claim
+    /// Returns Ok(true) if authentication succeeded, Ok(false) if we don't have a claim
+    async fn try_authenticate(
+        &self,
+        conn: &iroh::endpoint::Connection,
+        dest: &EndpointId,
+    ) -> Result<bool> {
+        // Check if we've already authenticated to this peer
+        if self.authenticated_to.contains_key(dest) {
+            trace!("Already authenticated to {}", dest);
+            return Ok(true);
+        }
+
+        // Try to load our claim for this device
+        let our_device_key = self.endpoint.id();
+        let claim = match FirewallConfig::load_claim(&our_device_key)? {
+            Some(c) => c,
+            None => {
+                debug!("No ownership claim found for this device, skipping authentication");
+                return Ok(false);
+            }
+        };
+
+        info!("Sending ownership claim to {} for authentication", dest);
+
+        // Open stream for authentication
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .context("Failed to open authentication stream")?;
+
+        // Send the claim
+        let auth_packet = Packet::Auth(AuthMessage::Claim(claim));
+        let auth_bytes =
+            postcard::to_allocvec(&auth_packet).context("Failed to serialize auth packet")?;
+
+        send.write_all(&auth_bytes)
+            .await
+            .context("Failed to send auth packet")?;
+        send.finish().context("Failed to finish auth stream")?;
+
+        // Wait for response
+        let response_bytes = recv
+            .read_to_end(MAX_PACKET_SIZE)
+            .await
+            .context("Failed to read auth response")?;
+
+        let response: Packet =
+            postcard::from_bytes(&response_bytes).context("Failed to deserialize auth response")?;
+
+        match response {
+            Packet::Auth(AuthMessage::Response(AuthResponse::Accepted)) => {
+                info!("Authentication accepted by {}", dest);
+                self.authenticated_to.insert(*dest, true);
+                Ok(true)
+            }
+            Packet::Auth(AuthMessage::Response(AuthResponse::Rejected { reason })) => {
+                warn!("Authentication rejected by {}: {}", dest, reason);
+                anyhow::bail!("Authentication rejected: {}", reason);
+            }
+            _ => {
+                warn!("Unexpected response to authentication from {}", dest);
+                anyhow::bail!("Unexpected authentication response");
+            }
+        }
+    }
+
     /// Accept loop: accepts incoming connections and receives packets
     async fn accept_loop(
         endpoint: Endpoint,
         registry: Arc<Registry>,
         from_network_tx: mpsc::UnboundedSender<Packet>,
+        firewall: Arc<RwLock<FirewallConfig>>,
     ) -> Result<()> {
         info!("Starting accept loop on {}", endpoint.id());
 
@@ -251,9 +353,11 @@ impl IronProtocol {
             // Spawn task to handle this connection
             let registry = registry.clone();
             let from_network_tx = from_network_tx.clone();
+            let firewall = firewall.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    Self::handle_connection(conn, sender_id, registry, from_network_tx).await
+                    Self::handle_connection(conn, sender_id, registry, from_network_tx, firewall)
+                        .await
                 {
                     warn!("Connection handler failed for {}: {}", sender_id, e);
                 }
@@ -267,17 +371,166 @@ impl IronProtocol {
     ///
     /// This function loops to handle multiple streams on the same connection,
     /// allowing for connection reuse and avoiding repeated handshakes.
+    /// If firewall is enabled, the first packet must be an Auth packet.
     async fn handle_connection(
         conn: iroh::endpoint::Connection,
         sender_id: EndpointId,
         registry: Arc<Registry>,
         from_network_tx: mpsc::UnboundedSender<Packet>,
+        firewall: Arc<RwLock<FirewallConfig>>,
     ) -> Result<()> {
         debug!(
             "Handling connection from {}, accepting streams...",
             sender_id
         );
 
+        // Check if firewall is enabled
+        let firewall_enabled = {
+            let fw = firewall.read().await;
+            fw.enabled
+        };
+
+        // If firewall is enabled, we need authentication first (to know which person this device belongs to)
+        if firewall_enabled {
+            info!(
+                "Firewall enabled: waiting for authentication from {}",
+                sender_id
+            );
+
+            // Accept first stream for authentication
+            let stream_result = conn.accept_bi().await;
+            let (mut send, mut recv) = match stream_result {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Connection from {} closed before auth: {}", sender_id, e);
+                    return Ok(());
+                }
+            };
+
+            // Read auth packet
+            let packet_bytes = match recv.read_to_end(MAX_PACKET_SIZE).await {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Failed to read auth packet from {}: {}", sender_id, e);
+                    return Ok(());
+                }
+            };
+
+            // Deserialize packet
+            let packet: Packet = match postcard::from_bytes(&packet_bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize auth packet from {}: {}",
+                        sender_id, e
+                    );
+                    // Send rejection
+                    let response = Packet::Auth(AuthMessage::Response(AuthResponse::Rejected {
+                        reason: "Invalid packet format".to_string(),
+                    }));
+                    let response_bytes = postcard::to_allocvec(&response).unwrap_or_default();
+                    let _ = send.write_all(&response_bytes).await;
+                    let _ = send.finish();
+                    return Ok(());
+                }
+            };
+
+            // Verify it's an auth packet with a claim
+            match packet {
+                Packet::Auth(AuthMessage::Claim(claim)) => {
+                    debug!("Received ownership claim from {}", sender_id);
+
+                    // Verify the claim matches the sender
+                    if claim.device_key != sender_id {
+                        warn!(
+                            "Claim device key mismatch: claim={}, sender={}",
+                            claim.device_key, sender_id
+                        );
+                        let response =
+                            Packet::Auth(AuthMessage::Response(AuthResponse::Rejected {
+                                reason: "Device key mismatch".to_string(),
+                            }));
+                        let response_bytes = postcard::to_allocvec(&response).unwrap_or_default();
+                        let _ = send.write_all(&response_bytes).await;
+                        let _ = send.finish();
+                        return Ok(());
+                    }
+
+                    // Verify claim and check if person is trusted
+                    let mut fw = firewall.write().await;
+                    match fw.verify_claim(&claim) {
+                        Ok(true) => {
+                            info!("Authentication successful for {}", sender_id);
+                            // Save cache to persist the verification
+                            if let Err(e) = fw.save_cache() {
+                                warn!("Failed to save firewall cache: {}", e);
+                            }
+                            drop(fw); // Release lock before sending response
+
+                            // Send acceptance
+                            let response =
+                                Packet::Auth(AuthMessage::Response(AuthResponse::Accepted));
+                            let response_bytes =
+                                postcard::to_allocvec(&response).unwrap_or_default();
+                            if let Err(e) = send.write_all(&response_bytes).await {
+                                warn!("Failed to send auth response: {}", e);
+                                return Ok(());
+                            }
+                            if let Err(e) = send.finish() {
+                                warn!("Failed to finish auth stream: {}", e);
+                            }
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "Authentication failed for {}: person not trusted",
+                                sender_id
+                            );
+                            drop(fw);
+                            let response =
+                                Packet::Auth(AuthMessage::Response(AuthResponse::Rejected {
+                                    reason: "Person not trusted".to_string(),
+                                }));
+                            let response_bytes =
+                                postcard::to_allocvec(&response).unwrap_or_default();
+                            let _ = send.write_all(&response_bytes).await;
+                            let _ = send.finish();
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Authentication failed for {}: claim verification error: {}",
+                                sender_id, e
+                            );
+                            drop(fw);
+                            let response =
+                                Packet::Auth(AuthMessage::Response(AuthResponse::Rejected {
+                                    reason: format!("Claim verification failed: {}", e),
+                                }));
+                            let response_bytes =
+                                postcard::to_allocvec(&response).unwrap_or_default();
+                            let _ = send.write_all(&response_bytes).await;
+                            let _ = send.finish();
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => {
+                    warn!(
+                        "Expected Auth packet from {}, got different packet type",
+                        sender_id
+                    );
+                    let response = Packet::Auth(AuthMessage::Response(AuthResponse::Rejected {
+                        reason: "Expected authentication packet".to_string(),
+                    }));
+                    let response_bytes = postcard::to_allocvec(&response).unwrap_or_default();
+                    let _ = send.write_all(&response_bytes).await;
+                    let _ = send.finish();
+                    return Ok(());
+                }
+            }
+        }
+
+        // Authentication successful or not required - proceed with normal packet handling
         // Loop to handle multiple streams on this connection
         loop {
             trace!("Waiting for bi-directional stream from {}", sender_id);
@@ -309,6 +562,42 @@ impl IronProtocol {
                 packet.len()
             );
 
+            // Check firewall policy (if enabled and has policies)
+            {
+                let fw = firewall.read().await;
+                if fw.enabled {
+                    // Extract destination port from packet (returns None for non-TCP/UDP like ICMP)
+                    let dst_port = Self::extract_dst_port(&packet);
+
+                    // If we have a destination port, check policy
+                    // If packet has no port (e.g., ICMP), use port 0 as a sentinel
+                    let port_to_check = dst_port.unwrap_or(0);
+
+                    if !fw.is_packet_allowed(&sender_id, port_to_check) {
+                        warn!(
+                            "Packet from {} to port {} blocked by firewall policy",
+                            sender_id,
+                            if let Some(p) = dst_port {
+                                p.to_string()
+                            } else {
+                                "N/A (non-TCP/UDP)".to_string()
+                            }
+                        );
+                        continue; // Drop packet, try next stream
+                    }
+
+                    trace!(
+                        "Packet from {} to port {} allowed by firewall",
+                        sender_id,
+                        if let Some(p) = dst_port {
+                            p.to_string()
+                        } else {
+                            "N/A".to_string()
+                        }
+                    );
+                }
+            }
+
             // Rewrite source address to sender's derived IPv6
             // This ensures the OS sees the correct source for routing return packets
             let packet_with_correct_source =
@@ -335,6 +624,35 @@ impl IronProtocol {
 
         debug!("Connection handler for {} exiting", sender_id);
         Ok(())
+    }
+
+    /// Extracts the destination port from an IPv6 packet
+    ///
+    /// Returns None if the packet doesn't have a port (e.g., ICMP) or if parsing fails.
+    /// Supports TCP and UDP protocols.
+    fn extract_dst_port(packet: &[u8]) -> Option<u16> {
+        use etherparse::{Ipv6Header, TcpHeader, UdpHeader};
+
+        // Parse IPv6 header
+        let (ipv6_header, payload) = Ipv6Header::from_slice(packet).ok()?;
+
+        // Check protocol in next_header field
+        match ipv6_header.next_header.0 {
+            6 => {
+                // TCP
+                let (tcp_header, _) = TcpHeader::from_slice(payload).ok()?;
+                Some(tcp_header.destination_port)
+            }
+            17 => {
+                // UDP
+                let (udp_header, _) = UdpHeader::from_slice(payload).ok()?;
+                Some(udp_header.destination_port)
+            }
+            _ => {
+                // Other protocols (ICMP, etc.) don't have ports
+                None
+            }
+        }
     }
 
     /// Rewrites the packet's source IPv6 to match the sender's derived IPv6
@@ -646,7 +964,9 @@ mod tests {
         let (_to_network_tx, to_network_rx) = mpsc::unbounded_channel();
         let (from_network_tx, _from_network_rx) = mpsc::unbounded_channel();
 
-        let protocol = IronProtocol::new(registry, endpoint, to_network_rx, from_network_tx);
+        let firewall = FirewallConfig::new();
+        let protocol =
+            IronProtocol::new(registry, endpoint, to_network_rx, from_network_tx, firewall);
 
         // Verify construction doesn't panic
         assert_eq!(
@@ -769,5 +1089,134 @@ mod tests {
             pre_registered_ipv6, post_rewrite_ipv6,
             "Registry mapping should remain consistent"
         );
+    }
+
+    /// Helper to create an IPv6 packet with TCP header
+    fn create_tcp_packet(src: Ipv6Addr, dst: Ipv6Addr, src_port: u16, dst_port: u16) -> Vec<u8> {
+        use etherparse::{Ipv6Header, TcpHeader};
+
+        let mut tcp_header = TcpHeader::new(src_port, dst_port, 0, 0);
+        tcp_header.syn = true;
+
+        // Build packet
+        let mut packet = Vec::new();
+
+        // Write IPv6 header
+        let ipv6_header = Ipv6Header {
+            traffic_class: 0,
+            flow_label: 0.try_into().unwrap(),
+            payload_length: tcp_header.header_len() as u16,
+            next_header: 6.into(), // TCP
+            hop_limit: 64,
+            source: src.octets(),
+            destination: dst.octets(),
+        };
+        ipv6_header.write(&mut packet).unwrap();
+
+        // Write TCP header
+        tcp_header.write(&mut packet).unwrap();
+
+        packet
+    }
+
+    /// Helper to create an IPv6 packet with UDP header
+    fn create_udp_packet(src: Ipv6Addr, dst: Ipv6Addr, src_port: u16, dst_port: u16) -> Vec<u8> {
+        use etherparse::{Ipv6Header, UdpHeader};
+
+        let udp_header = UdpHeader {
+            source_port: src_port,
+            destination_port: dst_port,
+            length: 8, // UDP header only, no payload
+            checksum: 0,
+        };
+
+        // Build packet
+        let mut packet = Vec::new();
+
+        // Write IPv6 header
+        let ipv6_header = Ipv6Header {
+            traffic_class: 0,
+            flow_label: 0.try_into().unwrap(),
+            payload_length: 8,
+            next_header: 17.into(), // UDP
+            hop_limit: 64,
+            source: src.octets(),
+            destination: dst.octets(),
+        };
+        ipv6_header.write(&mut packet).unwrap();
+
+        // Write UDP header
+        udp_header.write(&mut packet).unwrap();
+
+        packet
+    }
+
+    #[test]
+    fn test_extract_dst_port_tcp() {
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+
+        let packet = create_tcp_packet(src, dst, 12345, 80);
+        let port = IronProtocol::extract_dst_port(&packet);
+
+        assert_eq!(port, Some(80), "Should extract TCP destination port");
+    }
+
+    #[test]
+    fn test_extract_dst_port_udp() {
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+
+        let packet = create_udp_packet(src, dst, 54321, 53);
+        let port = IronProtocol::extract_dst_port(&packet);
+
+        assert_eq!(port, Some(53), "Should extract UDP destination port");
+    }
+
+    #[test]
+    fn test_extract_dst_port_various_ports() {
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+
+        // Test various common ports
+        let test_ports = [80, 443, 22, 3000, 8080, 65535];
+
+        for &port in &test_ports {
+            let tcp_packet = create_tcp_packet(src, dst, 50000, port);
+            assert_eq!(
+                IronProtocol::extract_dst_port(&tcp_packet),
+                Some(port),
+                "Should extract TCP port {}",
+                port
+            );
+
+            let udp_packet = create_udp_packet(src, dst, 50000, port);
+            assert_eq!(
+                IronProtocol::extract_dst_port(&udp_packet),
+                Some(port),
+                "Should extract UDP port {}",
+                port
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_dst_port_icmp() {
+        // Create ICMP packet (no port)
+        let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+        let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
+
+        let packet = create_ipv6_packet(src, dst, 8); // next_header = 59 (no next header)
+        let port = IronProtocol::extract_dst_port(&packet);
+
+        assert_eq!(port, None, "ICMP packets should return None");
+    }
+
+    #[test]
+    fn test_extract_dst_port_invalid_packet() {
+        let invalid_packet = vec![0x60, 0x00, 0x00]; // Too small
+        let port = IronProtocol::extract_dst_port(&invalid_packet);
+
+        assert_eq!(port, None, "Invalid packets should return None");
     }
 }

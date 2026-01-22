@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A person's long-term identity key
@@ -88,6 +89,27 @@ impl PersonKey {
 pub struct PersonSecretKey {
     /// Ed25519 secret key (32 bytes seed)
     secret_key: [u8; 32],
+}
+
+impl PersonSecretKey {
+    /// Get the default path for storing person secret key
+    pub fn default_path() -> Result<PathBuf> {
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        Ok(PathBuf::from(home).join(".config/iron/person_key.secret"))
+    }
+
+    /// Load person secret key from default location
+    pub fn load_from_default_path() -> Result<Self> {
+        let path = Self::default_path()?;
+        let hex = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read person key from {}", path.display()))?;
+        Self::from_hex(hex.trim())
+    }
+
+    /// Check if person secret key exists at default location
+    pub fn exists_at_default_path() -> bool {
+        Self::default_path().map(|p| p.exists()).unwrap_or(false)
+    }
 }
 
 impl PersonSecretKey {
@@ -230,14 +252,169 @@ pub enum FirewallAction {
     Accept,
 }
 
+impl std::fmt::Display for FirewallAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FirewallAction::Accept => write!(f, "accept"),
+        }
+    }
+}
+
 /// Source of a packet for policy matching
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum PacketSource {
+    /// Match any peer (wildcard)
+    Any,
+
     /// Match by person key (by name from trusted_persons)
     Person(String), // references TrustedPerson.name
 
     /// Match by specific device EndpointId
     Peer(EndpointId),
+}
+
+impl PacketSource {
+    /// Parse a source string into a PacketSource
+    /// Formats:
+    /// - "*" -> Any
+    /// - "person:alice" -> Person("alice")
+    /// - "peer:<endpoint_id>" -> Peer(endpoint_id)
+    /// - "<endpoint_id>" -> Peer(endpoint_id) (backward compat)
+    pub fn parse(s: &str) -> Result<Self> {
+        if s == "*" {
+            return Ok(Self::Any);
+        }
+
+        if let Some(name) = s.strip_prefix("person:") {
+            return Ok(Self::Person(name.to_string()));
+        }
+
+        if let Some(id_str) = s.strip_prefix("peer:") {
+            let endpoint_id =
+                EndpointId::from_str(id_str).context("Invalid endpoint ID in peer source")?;
+            return Ok(Self::Peer(endpoint_id));
+        }
+
+        // Try parsing as raw endpoint ID (backward compatibility)
+        match EndpointId::from_str(s) {
+            Ok(endpoint_id) => Ok(Self::Peer(endpoint_id)),
+            Err(_) => anyhow::bail!(
+                "Invalid source format. Use '*', 'person:<name>', or 'peer:<endpoint_id>'"
+            ),
+        }
+    }
+
+    /// Check if this source matches a given device
+    pub fn matches(
+        &self,
+        device: &DeviceKey,
+        person: Option<&PersonKey>,
+        config: &FirewallConfig,
+    ) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Peer(id) => id == device,
+            Self::Person(name) => {
+                // Check if the device is owned by this person
+                if let Some(person_key) = person {
+                    config
+                        .trusted_persons
+                        .iter()
+                        .any(|p| &p.name == name && &p.key == person_key)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+/// Port range for firewall rules
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PortRange {
+    /// Match any port (wildcard)
+    Any,
+
+    /// Match a specific port
+    Single(u16),
+
+    /// Match ports from min to max (inclusive)
+    Range { min: u16, max: u16 },
+
+    /// Match ports from min to 65535
+    From(u16),
+}
+
+impl PortRange {
+    /// Parse a port range string
+    /// Formats:
+    /// - "*" -> Any
+    /// - "80" -> Single(80)
+    /// - "1000-2000" -> Range{min: 1000, max: 2000}
+    /// - "1000-" -> From(1000)
+    pub fn parse(s: &str) -> Result<Self> {
+        if s == "*" {
+            return Ok(Self::Any);
+        }
+
+        // Check for range formats
+        if let Some(dash_pos) = s.find('-') {
+            let start_str = &s[..dash_pos];
+            let end_str = &s[dash_pos + 1..];
+
+            if end_str.is_empty() {
+                // Format: "1000-"
+                let min = start_str
+                    .parse::<u16>()
+                    .context("Invalid port number in range")?;
+                return Ok(Self::From(min));
+            } else {
+                // Format: "1000-2000"
+                let min = start_str
+                    .parse::<u16>()
+                    .context("Invalid start port in range")?;
+                let max = end_str
+                    .parse::<u16>()
+                    .context("Invalid end port in range")?;
+
+                if min > max {
+                    anyhow::bail!(
+                        "Invalid port range: start port {} is greater than end port {}",
+                        min,
+                        max
+                    );
+                }
+
+                return Ok(Self::Range { min, max });
+            }
+        }
+
+        // Single port
+        let port = s.parse::<u16>().context("Invalid port number")?;
+        Ok(Self::Single(port))
+    }
+
+    /// Check if a port matches this range
+    pub fn matches(&self, port: u16) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Single(p) => port == *p,
+            Self::Range { min, max } => port >= *min && port <= *max,
+            Self::From(min) => port >= *min,
+        }
+    }
+}
+
+impl std::fmt::Display for PortRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Any => write!(f, "*"),
+            Self::Single(p) => write!(f, "{}", p),
+            Self::Range { min, max } => write!(f, "{}-{}", min, max),
+            Self::From(min) => write!(f, "{}-", min),
+        }
+    }
 }
 
 /// A trusted person entry in the firewall configuration
@@ -260,11 +437,60 @@ pub struct FirewallPolicy {
     pub action: FirewallAction,
 
     /// Source to match
+    #[serde(rename = "src")]
     pub source: PacketSource,
+
+    /// Destination port to match (optional, defaults to any)
+    #[serde(rename = "dstPort", skip_serializing_if = "Option::is_none", default)]
+    pub dst_port: Option<PortRange>,
+}
+
+impl FirewallPolicy {
+    /// Create a new policy accepting from a source on any port
+    pub fn accept_from(source: PacketSource) -> Self {
+        Self {
+            action: FirewallAction::Accept,
+            source,
+            dst_port: None,
+        }
+    }
+
+    /// Create a new policy accepting from a source on specific ports
+    pub fn accept_from_with_port(source: PacketSource, dst_port: PortRange) -> Self {
+        Self {
+            action: FirewallAction::Accept,
+            source,
+            dst_port: Some(dst_port),
+        }
+    }
+
+    /// Check if this policy matches a given packet
+    pub fn matches(
+        &self,
+        device: &DeviceKey,
+        person: Option<&PersonKey>,
+        dst_port: u16,
+        config: &FirewallConfig,
+    ) -> bool {
+        // Check source match
+        if !self.source.matches(device, person, config) {
+            return false;
+        }
+
+        // Check port match
+        if let Some(port_range) = &self.dst_port
+            && !port_range.matches(dst_port)
+        {
+            return false;
+        }
+
+        // All conditions match
+        true
+    }
 }
 
 /// Firewall configuration for a node
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FirewallConfig {
     /// Whether the firewall is enabled
     pub enabled: bool,
@@ -279,17 +505,6 @@ pub struct FirewallConfig {
     /// Persisted to disk for performance
     #[serde(skip)]
     pub verified_devices: HashMap<DeviceKey, PersonKey>,
-}
-
-impl Default for FirewallConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            trusted_persons: Vec::new(),
-            policies: Vec::new(),
-            verified_devices: HashMap::new(),
-        }
-    }
 }
 
 impl FirewallConfig {
@@ -329,6 +544,31 @@ impl FirewallConfig {
         self.verified_devices.contains_key(device_key)
     }
 
+    /// Check if a packet is allowed based on policies
+    /// Returns true if any policy matches, or if no policies are configured (backward compat)
+    pub fn is_packet_allowed(&self, device_key: &DeviceKey, dst_port: u16) -> bool {
+        if !self.enabled {
+            return true; // Firewall disabled, allow all
+        }
+
+        // If no policies configured, fall back to device verification only
+        if self.policies.is_empty() {
+            return self.is_device_allowed(device_key);
+        }
+
+        // Get the person key for this device (if verified)
+        let person_key = self.verified_devices.get(device_key);
+
+        // Check if any policy matches
+        for policy in &self.policies {
+            if policy.matches(device_key, person_key, dst_port, self) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Add a trusted person
     pub fn add_person(&mut self, person: TrustedPerson) {
         self.trusted_persons.push(person);
@@ -352,32 +592,142 @@ impl FirewallConfig {
     }
 
     /// Get the path to the firewall config file
+    #[allow(dead_code)]
     fn config_path() -> Result<PathBuf> {
-        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        Self::config_path_with_home(None)
+    }
+
+    /// Get the path to the firewall config file with optional home override (for testing)
+    fn config_path_with_home(home_override: Option<&str>) -> Result<PathBuf> {
+        let home = if let Some(home) = home_override {
+            home.to_string()
+        } else {
+            std::env::var("HOME").context("HOME environment variable not set")?
+        };
         Ok(PathBuf::from(home).join(".config/iron/firewall.json"))
     }
 
     /// Get the path to the verified devices cache
+    #[allow(dead_code)]
     fn cache_path() -> Result<PathBuf> {
-        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        Self::cache_path_with_home(None)
+    }
+
+    /// Get the path to the verified devices cache with optional home override (for testing)
+    fn cache_path_with_home(home_override: Option<&str>) -> Result<PathBuf> {
+        let home = if let Some(home) = home_override {
+            home.to_string()
+        } else {
+            std::env::var("HOME").context("HOME environment variable not set")?
+        };
         Ok(PathBuf::from(home).join(".config/iron/firewall_cache.json"))
+    }
+
+    /// Get the path to the claims directory
+    fn claims_dir() -> Result<PathBuf> {
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
+        Ok(PathBuf::from(home).join(".config/iron/claims"))
+    }
+
+    /// Get the path to a claim file for a specific person key and device key
+    pub fn claim_path(person_key: &PersonKey, device_key: &DeviceKey) -> Result<PathBuf> {
+        let claims_dir = Self::claims_dir()?;
+        let filename = format!("{}-{}.json", person_key.to_hex(), device_key);
+        Ok(claims_dir.join(filename))
+    }
+
+    /// Save a claim to the standard claims directory
+    pub fn save_claim(claim: &OwnershipClaim) -> Result<()> {
+        let claims_dir = Self::claims_dir()?;
+
+        // Create directory if it doesn't exist
+        fs::create_dir_all(&claims_dir).context("Failed to create claims directory")?;
+
+        // Set directory permissions to 0700 (owner only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&claims_dir)?.permissions();
+            perms.set_mode(0o700);
+            fs::set_permissions(&claims_dir, perms)?;
+        }
+
+        let claim_path = Self::claim_path(&claim.person_key, &claim.device_key)?;
+        let json = serde_json::to_string_pretty(claim).context("Failed to serialize claim")?;
+
+        fs::write(&claim_path, json)
+            .with_context(|| format!("Failed to write claim to {}", claim_path.display()))?;
+
+        // Set file permissions to 0600 (owner read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&claim_path)?.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&claim_path, perms)?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a claim for a specific device (if it exists)
+    pub fn load_claim(device_key: &DeviceKey) -> Result<Option<OwnershipClaim>> {
+        let claims_dir = Self::claims_dir()?;
+
+        if !claims_dir.exists() {
+            return Ok(None);
+        }
+
+        // Look for any claim file matching this device key
+        let entries = fs::read_dir(&claims_dir).context("Failed to read claims directory")?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            if !path.is_file() {
+                continue;
+            }
+
+            // Check if filename ends with this device key
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+                && filename.ends_with(&format!("{}.json", device_key))
+            {
+                // Found a matching claim file
+                let json = fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read claim file: {}", path.display()))?;
+
+                let claim: OwnershipClaim = serde_json::from_str(&json)
+                    .with_context(|| format!("Failed to parse claim file: {}", path.display()))?;
+
+                return Ok(Some(claim));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Load firewall configuration from disk
     pub fn load() -> Result<Self> {
-        let config_path = Self::config_path()?;
+        Self::load_from_home(None)
+    }
 
-        if !config_path.exists() {
-            return Ok(Self::default());
-        }
+    /// Load firewall configuration with optional home override (for testing)
+    pub fn load_from_home(home_override: Option<&str>) -> Result<Self> {
+        let config_path = Self::config_path_with_home(home_override)?;
 
-        let json = fs::read_to_string(&config_path).context("Failed to read firewall config")?;
+        // Load main config if it exists, otherwise use default
+        let mut config: Self = if config_path.exists() {
+            let json =
+                fs::read_to_string(&config_path).context("Failed to read firewall config")?;
+            serde_json::from_str(&json).context("Failed to parse firewall config")?
+        } else {
+            Self::default()
+        };
 
-        let mut config: Self =
-            serde_json::from_str(&json).context("Failed to parse firewall config")?;
-
-        // Load verified devices cache separately
-        let cache_path = Self::cache_path()?;
+        // Always try to load verified devices cache (even if main config doesn't exist)
+        // This allows cache to persist independently
+        let cache_path = Self::cache_path_with_home(home_override)?;
         if cache_path.exists() {
             let cache_json =
                 fs::read_to_string(&cache_path).context("Failed to read firewall cache")?;
@@ -390,7 +740,12 @@ impl FirewallConfig {
 
     /// Save firewall configuration to disk
     pub fn save(&self) -> Result<()> {
-        let config_path = Self::config_path()?;
+        Self::save_with_home(self, None)
+    }
+
+    /// Save firewall configuration with optional home override (for testing)
+    pub fn save_with_home(&self, home_override: Option<&str>) -> Result<()> {
+        let config_path = Self::config_path_with_home(home_override)?;
 
         // Create directory if it doesn't exist
         if let Some(dir) = config_path.parent() {
@@ -421,14 +776,19 @@ impl FirewallConfig {
         }
 
         // Save verified devices cache separately
-        self.save_cache()?;
+        self.save_cache_with_home(home_override)?;
 
         Ok(())
     }
 
     /// Save only the verified devices cache
     pub fn save_cache(&self) -> Result<()> {
-        let cache_path = Self::cache_path()?;
+        self.save_cache_with_home(None)
+    }
+
+    /// Save only the verified devices cache with optional home override (for testing)
+    fn save_cache_with_home(&self, home_override: Option<&str>) -> Result<()> {
+        let cache_path = Self::cache_path_with_home(home_override)?;
 
         // Create directory if it doesn't exist (usually already exists)
         if let Some(dir) = cache_path.parent() {
@@ -603,11 +963,7 @@ mod tests {
         use tempfile::TempDir;
         let temp_dir = TempDir::new().unwrap();
 
-        // Override HOME to use temp directory
         let home_path = temp_dir.path().to_str().unwrap();
-        unsafe {
-            std::env::set_var("HOME", home_path);
-        }
 
         let mut config = FirewallConfig::new();
         config.enabled = true;
@@ -620,11 +976,11 @@ mod tests {
         });
 
         // Save config
-        config.save().unwrap();
+        config.save_with_home(Some(home_path)).unwrap();
 
         // Load config
-        let loaded = FirewallConfig::load().unwrap();
-        assert_eq!(loaded.enabled, true);
+        let loaded = FirewallConfig::load_from_home(Some(home_path)).unwrap();
+        assert!(loaded.enabled);
         assert_eq!(loaded.trusted_persons.len(), 1);
         assert_eq!(loaded.trusted_persons[0].name, "test_person");
     }
@@ -634,11 +990,7 @@ mod tests {
         use tempfile::TempDir;
         let temp_dir = TempDir::new().unwrap();
 
-        // Override HOME to use temp directory
         let home_path = temp_dir.path().to_str().unwrap();
-        unsafe {
-            std::env::set_var("HOME", home_path);
-        }
 
         let mut config = FirewallConfig::new();
         let person_key = PersonSecretKey::generate().public_key();
@@ -649,10 +1001,271 @@ mod tests {
             .insert(device_key, person_key.clone());
 
         // Save cache
-        config.save_cache().unwrap();
+        config.save_cache_with_home(Some(home_path)).unwrap();
 
         // Load config (which includes cache)
-        let loaded = FirewallConfig::load().unwrap();
+        let loaded = FirewallConfig::load_from_home(Some(home_path)).unwrap();
         assert!(loaded.verified_devices.contains_key(&device_key));
+    }
+
+    #[test]
+    fn test_person_secret_key_helpers() {
+        use tempfile::TempDir;
+        let _temp_dir = TempDir::new().unwrap();
+
+        // Generate a key
+        let secret = PersonSecretKey::generate();
+        let public = secret.public_key();
+
+        // Test hex round-trip
+        let hex = secret.to_hex();
+        let parsed = PersonSecretKey::from_hex(&hex).unwrap();
+        assert_eq!(parsed.public_key(), public);
+    }
+
+    #[test]
+    fn test_claim_save_and_load() {
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().unwrap();
+
+        // Save original HOME
+        let original_home = std::env::var("HOME").ok();
+
+        // Override HOME for this test
+        unsafe {
+            std::env::set_var("HOME", temp_dir.path());
+        }
+
+        let person_secret = PersonSecretKey::generate();
+        let device_key = iroh::SecretKey::generate(&mut rand::rng()).public();
+
+        // Create and save a claim
+        let claim = OwnershipClaim::new(&person_secret, device_key, 3600);
+        FirewallConfig::save_claim(&claim).unwrap();
+
+        // Load it back
+        let loaded = FirewallConfig::load_claim(&device_key).unwrap();
+        assert!(loaded.is_some());
+
+        let loaded_claim = loaded.unwrap();
+        assert_eq!(loaded_claim.device_key, device_key);
+        assert_eq!(loaded_claim.person_key, person_secret.public_key());
+
+        // Restore original HOME
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_port_range_parsing() {
+        // Test wildcard
+        let any = PortRange::parse("*").unwrap();
+        assert_eq!(any, PortRange::Any);
+
+        // Test single port
+        let single = PortRange::parse("80").unwrap();
+        assert_eq!(single, PortRange::Single(80));
+
+        // Test range
+        let range = PortRange::parse("1000-2000").unwrap();
+        assert_eq!(
+            range,
+            PortRange::Range {
+                min: 1000,
+                max: 2000
+            }
+        );
+
+        // Test from
+        let from = PortRange::parse("1000-").unwrap();
+        assert_eq!(from, PortRange::From(1000));
+
+        // Test invalid
+        assert!(PortRange::parse("invalid").is_err());
+        assert!(PortRange::parse("2000-1000").is_err()); // Reversed range
+    }
+
+    #[test]
+    fn test_port_range_matching() {
+        // Any matches everything
+        let any = PortRange::Any;
+        assert!(any.matches(1));
+        assert!(any.matches(80));
+        assert!(any.matches(65535));
+
+        // Single matches only exact port
+        let single = PortRange::Single(80);
+        assert!(!single.matches(79));
+        assert!(single.matches(80));
+        assert!(!single.matches(81));
+
+        // Range matches inclusive
+        let range = PortRange::Range {
+            min: 1000,
+            max: 2000,
+        };
+        assert!(!range.matches(999));
+        assert!(range.matches(1000));
+        assert!(range.matches(1500));
+        assert!(range.matches(2000));
+        assert!(!range.matches(2001));
+
+        // From matches anything >= min
+        let from = PortRange::From(1000);
+        assert!(!from.matches(999));
+        assert!(from.matches(1000));
+        assert!(from.matches(50000));
+        assert!(from.matches(65535));
+    }
+
+    #[test]
+    fn test_packet_source_parsing() {
+        // Test wildcard
+        let any = PacketSource::parse("*").unwrap();
+        assert_eq!(any, PacketSource::Any);
+
+        // Test person
+        let person = PacketSource::parse("person:alice").unwrap();
+        assert_eq!(person, PacketSource::Person("alice".to_string()));
+
+        // Test peer with prefix
+        let endpoint_id = iroh::SecretKey::generate(&mut rand::rng()).public();
+        let peer = PacketSource::parse(&format!("peer:{}", endpoint_id)).unwrap();
+        assert_eq!(peer, PacketSource::Peer(endpoint_id));
+
+        // Test backward compat (raw endpoint ID)
+        let peer2 = PacketSource::parse(&endpoint_id.to_string()).unwrap();
+        assert_eq!(peer2, PacketSource::Peer(endpoint_id));
+
+        // Test invalid
+        assert!(PacketSource::parse("invalid").is_err());
+    }
+
+    #[test]
+    fn test_packet_source_matching() {
+        let mut config = FirewallConfig::new();
+
+        let person_secret = PersonSecretKey::generate();
+        let person_key = person_secret.public_key();
+        let device1 = iroh::SecretKey::generate(&mut rand::rng()).public();
+        let device2 = iroh::SecretKey::generate(&mut rand::rng()).public();
+
+        // Add person to config
+        config.add_person(TrustedPerson {
+            name: "alice".to_string(),
+            comment: None,
+            key: person_key.clone(),
+        });
+
+        // Test Any - matches everything
+        let any = PacketSource::Any;
+        assert!(any.matches(&device1, None, &config));
+        assert!(any.matches(&device2, Some(&person_key), &config));
+
+        // Test Peer - matches specific device only
+        let peer = PacketSource::Peer(device1);
+        assert!(peer.matches(&device1, None, &config));
+        assert!(!peer.matches(&device2, None, &config));
+
+        // Test Person - matches device owned by that person
+        let person = PacketSource::Person("alice".to_string());
+        assert!(person.matches(&device1, Some(&person_key), &config));
+        assert!(!person.matches(&device1, None, &config)); // No person info
+        assert!(person.matches(&device2, Some(&person_key), &config)); // Same person
+
+        // Test unknown person
+        let unknown = PacketSource::Person("bob".to_string());
+        assert!(!unknown.matches(&device1, Some(&person_key), &config));
+    }
+
+    #[test]
+    fn test_firewall_policy_matching() {
+        let mut config = FirewallConfig::new();
+        config.enabled = true;
+
+        let person_secret = PersonSecretKey::generate();
+        let person_key = person_secret.public_key();
+        let device = iroh::SecretKey::generate(&mut rand::rng()).public();
+
+        config.add_person(TrustedPerson {
+            name: "alice".to_string(),
+            comment: None,
+            key: person_key.clone(),
+        });
+
+        // Cache the device as verified
+        config.verified_devices.insert(device, person_key.clone());
+
+        // Policy: accept from alice on any port
+        let policy1 = FirewallPolicy::accept_from(PacketSource::Person("alice".to_string()));
+        assert!(policy1.matches(&device, Some(&person_key), 80, &config));
+        assert!(policy1.matches(&device, Some(&person_key), 443, &config));
+
+        // Policy: accept from alice on port 80 only
+        let policy2 = FirewallPolicy::accept_from_with_port(
+            PacketSource::Person("alice".to_string()),
+            PortRange::Single(80),
+        );
+        assert!(policy2.matches(&device, Some(&person_key), 80, &config));
+        assert!(!policy2.matches(&device, Some(&person_key), 443, &config));
+
+        // Policy: accept from any on ports 1000+
+        let policy3 =
+            FirewallPolicy::accept_from_with_port(PacketSource::Any, PortRange::From(1000));
+        assert!(policy3.matches(&device, Some(&person_key), 1000, &config));
+        assert!(policy3.matches(&device, Some(&person_key), 65535, &config));
+        assert!(!policy3.matches(&device, Some(&person_key), 999, &config));
+    }
+
+    #[test]
+    fn test_firewall_is_packet_allowed() {
+        let mut config = FirewallConfig::new();
+        config.enabled = true;
+
+        let person_secret = PersonSecretKey::generate();
+        let person_key = person_secret.public_key();
+        let device = iroh::SecretKey::generate(&mut rand::rng()).public();
+
+        config.add_person(TrustedPerson {
+            name: "alice".to_string(),
+            comment: None,
+            key: person_key.clone(),
+        });
+
+        // Cache the device
+        config.verified_devices.insert(device, person_key.clone());
+
+        // No policies - should fall back to device verification
+        assert!(config.is_packet_allowed(&device, 80));
+
+        // Add policy: accept from alice on port 80 only
+        config.policies.push(FirewallPolicy::accept_from_with_port(
+            PacketSource::Person("alice".to_string()),
+            PortRange::Single(80),
+        ));
+
+        // Should allow port 80
+        assert!(config.is_packet_allowed(&device, 80));
+
+        // Should reject port 443
+        assert!(!config.is_packet_allowed(&device, 443));
+
+        // Add wildcard policy for ports 1000+
+        config.policies.push(FirewallPolicy::accept_from_with_port(
+            PacketSource::Any,
+            PortRange::From(1000),
+        ));
+
+        // Should now allow ports 1000+
+        assert!(config.is_packet_allowed(&device, 1000));
+        assert!(config.is_packet_allowed(&device, 8080));
+
+        // Should still reject other ports
+        assert!(!config.is_packet_allowed(&device, 443));
     }
 }

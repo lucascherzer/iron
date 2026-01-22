@@ -1,4 +1,5 @@
 use crate::dns::DnsResolver;
+use crate::firewall::FirewallConfig;
 use crate::keys;
 use crate::mapping::Registry;
 use crate::protocol::IronProtocol;
@@ -77,6 +78,26 @@ impl IronNode {
         info!("Creating TUN interface");
         let tun = TunInterface::new(registry.clone(), node_ipv6, to_network_tx, from_network_rx);
 
+        // Load firewall configuration
+        info!("Loading firewall configuration");
+        let firewall = match FirewallConfig::load() {
+            Ok(fw) => {
+                if fw.enabled {
+                    info!(
+                        "Firewall enabled with {} trusted persons",
+                        fw.trusted_persons.len()
+                    );
+                } else {
+                    info!("Firewall disabled");
+                }
+                fw
+            }
+            Err(e) => {
+                warn!("Failed to load firewall config: {}, using default", e);
+                FirewallConfig::new()
+            }
+        };
+
         // Initialize protocol handler
         info!("Creating protocol handler");
         let protocol = IronProtocol::new(
@@ -84,6 +105,7 @@ impl IronNode {
             endpoint.clone(),
             to_network_rx,
             from_network_tx,
+            firewall,
         );
 
         info!("IronNode initialized successfully");
