@@ -5,7 +5,7 @@
 
 ## Summary
 
-Implement a whitelist-based firewall that allows users to trust **person identities** rather than individual devices. Since device keys can be generated cheaply, a blocklist approach doesn't make sense. Instead, we introduce a two-tier key system: **person keys** and **device keys**.
+Implement a whitelist-based firewall that allows users to trust **person identities** as well as individual devices. Since device keys can be generated cheaply, a blocklist approach doesn't make sense. Instead, we introduce a two-tier key system: **person keys** and **device keys**.
 
 ## Original Considerations
 
@@ -98,18 +98,28 @@ This extends the [packet abstraction proposal](./packet-abstraction.md):
 #[non_exhaustive]
 pub enum Packet {
     Raw(Vec<u8>),
-    Onion(OnionMessage),
+    Onion(OnionMessage), // not yet implemented, firewall first
     
     /// Authentication packet carrying device ownership proof
     /// 
     /// Sent as the first message when establishing a connection to a
     /// firewall-enabled peer. Must be validated before any other packets
     /// are accepted.
+    /// 
+    /// Authentication is cached persistently - once a device is verified,
+    /// it remains in the verified_devices cache until the claim expires
+    /// or the person key is removed from the whitelist.
     Auth(AuthMessage),
 }
 
 pub enum AuthMessage {
-    /// Claim ownership of this device
+    /// Device ownership claim
+    /// 
+    /// When initiating communication to a peer, we identify ourselves as being
+    /// owned by a person the receiver trusts.
+    /// 
+    /// For MVP, each device has exactly one ownership claim (one person key).
+    /// Future versions may support multiple ownership claims for shared devices.
     Claim(OwnershipClaim),
     
     /// Response to claim (accept/reject)
@@ -127,21 +137,48 @@ pub enum AuthResponse {
 ```rust
 /// Firewall configuration for a node
 pub struct FirewallConfig {
-    /// Enable firewall (default: false for backward compatibility)
+    /// Whether the firewall is enabled
     enabled: bool,
     
-    /// Whitelist of trusted person keys
-    /// If empty and enabled=true, reject all connections
-    trusted_persons: HashSet<PersonKey>,
+    /// List of trusted persons
+    trusted_persons: Vec<TrustedPerson>,
     
-    /// Cache of verified device → person mappings
-    /// This avoids re-verifying ownership on every packet
-    verified_devices: Arc<DashMap<DeviceKey, PersonKey>>,
+    /// Firewall policies (whitelist rules)
+    policies: Vec<FirewallPolicy>,
     
-    /// Should we require re-authentication periodically?
-    /// (e.g., every 24 hours)
-    require_periodic_reauth: bool,
-    reauth_interval: Duration,
+    /// Cache of verified devices (device_key -> person_key)
+    /// Persisted to disk for performance
+    verified_devices: HashMap<DeviceKey, PersonKey>,
+}
+
+struct TrustedPerson {
+    /// User-provided name (used to reference in policies)
+    name: String,
+    
+    /// Optional user comment
+    comment: Option<String>,
+    
+    /// Ed25519 public key
+    key: PersonKey,
+}
+
+struct FirewallPolicy {
+    action: FirewallAction,
+    source: PacketSource,
+}
+
+/// Firewall action (currently only Accept for whitelist-based approach)
+enum FirewallAction {
+    Accept,
+}
+
+/// Source of a packet for policy matching
+enum PacketSource {
+    /// Match by person key (by name from trusted_persons)
+    Person(String), // references TrustedPerson.name
+    
+    /// Match by specific device EndpointId
+    Peer(EndpointId),
 }
 ```
 
@@ -157,24 +194,28 @@ Device B: Accept and process packet
 #### With Firewall (New Behavior)
 ```
 Device A → Device B: Connect via QUIC
-Device B: Check if A is in verified_devices cache
-  - If yes: accept packets normally
+Device B: Check if A is in verified_devices cache (persistent)
+  - If yes: accept packets normally (skip authentication)
   - If no: require authentication
 
-Device B → Device A: Require authentication
-Device A → Device B: Send Packet::Auth(Claim(ownership_proof))
-Device B: Verify signature on ownership_proof
-  - Extract person_key from claim
-  - Check if person_key is in trusted_persons whitelist
-  - Verify signature: verify(person_key || device_key, signature, person_key)
-  - If valid: add to verified_devices cache
-  - If invalid: reject connection
+If authentication required:
+  Device B → Device A: Require authentication
+  Device A → Device B: Send Packet::Auth(Claim(ownership_proof))
+  Device B: Verify signature on ownership_proof
+    - Extract person_key from claim
+    - Check if person_key is in trusted_persons whitelist
+    - Verify signature: verify(person_key || device_key, signature, person_key)
+    - If valid: add to verified_devices cache (persist to disk)
+    - If invalid: reject connection
 
-Device B → Device A: Send Packet::Auth(Response(Accepted/Rejected))
+  Device B → Device A: Send Packet::Auth(Response(Accepted/Rejected))
 
 If accepted:
   Device A → Device B: Send Packet::Raw (normal traffic)
   Device B: Accept and process packets
+  
+Note: verified_devices cache is persistent, so authentication only
+happens once until the claim expires or the person key is revoked.
 ```
 
 ### Ownership Claim Generation
@@ -243,53 +284,77 @@ impl FirewallConfig {
 
 ## User Experience
 
-### CLI Commands (Proposed)
+### Config (Proposed)
 
-```bash
-# Enable firewall (starts rejecting unknown devices)
-iron firewall enable
-
-# Add a trusted person
-iron firewall trust <person_key_base32>
-
-# List trusted persons
-iron firewall list
-
-# Remove a trusted person (revokes all their devices)
-iron firewall untrust <person_key_base32>
-
-# Generate a person key (for yourself)
-iron person-key generate --save
-
-# Export your person key (to share with friends)
-iron person-key export --format base32
-
-# Generate ownership claim for this device
-iron device claim --person-key ~/.config/iron/person_key
-
-# View current device's ownership claim
-iron device info
+```json ~/.config/iron/firewall.json
+{
+  "persons": [
+    {
+      "name": "alice",
+      "comment": "Alice - trusted friend",
+      "key": "ed25519:AAAA..."
+    },
+    {
+      "name": "bob",
+      "comment": "Bob - colleague",
+      "key": "ed25519:BBBB..."
+    }
+  ],
+  "policies": [
+    {
+      "action": "accept",
+      "src": "peer:nodeabc123..."
+    },
+    {
+      "action": "accept",
+      "src": "person:alice"
+    },
+    {
+      "action": "accept",
+      "src": "person:bob"
+    }
+  ]
+}
 ```
+Proper access controls are important (no one may read/write except for the
+owning user).
 
-### Configuration File (Proposed)
+We derive the types:
+```rust
+struct FirewallConfig {
+    trusted_persons: Vec<TrustedPerson>,
+    policies: Vec<FirewallPolicy>,
+    verified_devices: HashMap<DeviceKey, PersonKey>,
+}
 
-```toml
-# ~/.config/iron/firewall.toml
+struct TrustedPerson {
+    /// User-provided name (used as identifier in policies)
+    name: String,
+    
+    /// Optional user comment
+    comment: Option<String>,
+    
+    /// Ed25519 public key
+    key: PersonKey,
+}
 
-[firewall]
-enabled = true
-require_periodic_reauth = true
-reauth_interval = "24h"
+struct FirewallPolicy {
+    action: FirewallAction,
+    source: PacketSource,
+}
 
-[[firewall.trusted_persons]]
-name = "Alice"  # Optional human-readable name
-key = "DF7WWI7BNSCTFRVLZA4PVTK6U6E34DDWWKJAGNADTP5IWPJWRVQQ"
-added_at = "2026-01-21T10:30:00Z"
+/// We keep this an enum in case we ever have to add new variants
+enum FirewallAction {
+    Accept,
+}
 
-[[firewall.trusted_persons]]
-name = "Bob"
-key = "AE8XXJ8COTDUGS2MAB5QWUL7V7F45EEXLBKBHOBEUQ6JXQKXSWRR"
-added_at = "2026-01-20T15:45:00Z"
+enum PacketSource {
+    /// References a person by name from trusted_persons list
+    Person(String),
+    
+    /// Specific device EndpointId
+    Peer(EndpointId),
+}
 ```
 
 ## Security Considerations
@@ -378,9 +443,10 @@ added_at = "2026-01-20T15:45:00Z"
    - Manual entry? (error-prone)
    - Key servers? (centralization)
    
-2. **Multiple person keys per user**: Should a device be able to have multiple ownership claims?
-   - Use case: Shared devices owned by multiple people
-   - Complexity: Which person key to present?
+2. **Multiple person keys per device**: ~~Should a device be able to have multiple ownership claims?~~
+   - **MVP Decision**: Each device has exactly one ownership claim (singular ownership)
+   - Use case for future: Shared devices owned by multiple people
+   - Future complexity: Which person key to present during negotiation?
    
 3. **Backward compatibility**: How do firewall-enabled nodes interact with old nodes?
    - Option A: Reject old nodes entirely
@@ -413,11 +479,13 @@ added_at = "2026-01-20T15:45:00Z"
 
 ## Future Enhancements
 
-1. **Trust delegation**: Person A trusts person B, who trusts person C. Should A automatically trust C?
-2. **Group ownership**: Multiple people can jointly own a device (multi-sig)
-3. **Revocation infrastructure**: Distributed revocation lists
-4. **Trust levels**: Different access levels for different people (read-only, full access, etc.)
-5. **Audit logs**: Track which devices connected and when
-6. **Rate limiting**: Even trusted devices can be rate-limited
-7. **Conditional rules**: Time-based access, location-based, etc.
-8. **WASM-based rule engine**: User-defined closures for complex firewall rules
+1. **Multiple ownership claims**: Allow devices to be owned by multiple people (shared devices)
+2. **Trust delegation**: Person A trusts person B, who trusts person C. Should A automatically trust C?
+3. **Group ownership**: Multiple people can jointly own a device (multi-sig)
+4. **Revocation infrastructure**: Distributed revocation lists
+5. **Trust levels**: Different access levels for different people (read-only, full access, etc.)
+6. **Audit logs**: Track which devices connected and when
+7. **Rate limiting**: Even trusted devices can be rate-limited
+8. **Conditional rules**: Time-based access, location-based, etc.
+9. **WASM-based rule engine**: User-defined closures for complex firewall rules
+10. **Cache management**: Automatic cleanup of expired entries, cache size limits
