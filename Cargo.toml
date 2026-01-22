@@ -9,8 +9,8 @@ path = "src/bin/iron.rs"
 
 [dependencies]
 # Core networking
-iroh = "0.95.1"
-tun = { version = "0.8.5", features = ["async"] }
+iroh = "0.95"
+tun = { version = "0.8", features = ["async"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -36,11 +36,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Encoding/decoding
-data-encoding = "2.6"
+data-encoding = "2"
 hex = "0.4"
 
 # Serialization
-postcard = { version = "1.0", features = ["alloc"] }
+postcard = { version = "1", features = ["alloc"] }
 
 # Cryptography
 rand = "0.9"
@@ -50,7 +50,7 @@ async-trait = "0.1"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-nix = { version = "0.29", features = ["user"] }
+nix = { version = "0.31", features = ["user"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
