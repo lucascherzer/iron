@@ -41,9 +41,11 @@ hex = "0.4"
 
 # Serialization
 postcard = { version = "1", features = ["alloc"] }
+serde_bytes = "0.11"
 
 # Cryptography
 rand = "0.9"
+ed25519-dalek = "2"
 
 # Async traits
 async-trait = "0.1"

@@ -1,4 +1,9 @@
+use crate::firewall::OwnershipClaim;
 use serde::{Deserialize, Serialize};
+
+// Re-export auth types for convenience
+pub use AuthMessage::*;
+pub use AuthResponse::*;
 
 /// Packet types that can be transported over iron's protocol layer
 ///
@@ -24,6 +29,43 @@ pub enum Packet {
     /// This is the standard packet type for direct peer-to-peer communication.
     /// Contains the complete IPv6 packet including header and payload.
     Raw(Vec<u8>),
+
+    /// Authentication packet carrying device ownership proof
+    ///
+    /// Sent as the first message when establishing a connection to a
+    /// firewall-enabled peer. Must be validated before any other packets
+    /// are accepted.
+    ///
+    /// Authentication is cached persistently - once a device is verified,
+    /// it remains in the verified_devices cache until the claim expires
+    /// or the person key is removed from the whitelist.
+    Auth(AuthMessage),
+}
+
+/// Authentication message for firewall
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthMessage {
+    /// Device ownership claim
+    ///
+    /// When initiating communication to a peer, we identify ourselves as being
+    /// owned by a person the receiver trusts.
+    ///
+    /// For MVP, each device has exactly one ownership claim (one person key).
+    /// Future versions may support multiple ownership claims for shared devices.
+    Claim(OwnershipClaim),
+
+    /// Response to claim (accept/reject)
+    Response(AuthResponse),
+}
+
+/// Response to an authentication claim
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthResponse {
+    /// Authentication accepted
+    Accepted,
+
+    /// Authentication rejected with reason
+    Rejected { reason: String },
 }
 
 impl Packet {
@@ -32,23 +74,33 @@ impl Packet {
         Packet::Raw(data)
     }
 
+    /// Creates a new Auth packet
+    pub fn auth(message: AuthMessage) -> Self {
+        Packet::Auth(message)
+    }
+
     /// Returns the raw bytes of the packet
     ///
     /// For Raw packets, this returns the inner Vec<u8> directly.
-    /// For future packet types, this may perform serialization.
+    /// For Auth packets, this serializes using postcard.
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
             Packet::Raw(data) => data,
+            Packet::Auth(msg) => {
+                // Serialize auth message using postcard
+                postcard::to_allocvec(&msg).unwrap_or_default()
+            }
         }
     }
 
     /// Returns a reference to the raw bytes
     ///
     /// For Raw packets, this returns a reference to the inner data.
-    /// For future packet types, this may not be available.
+    /// For Auth packets, this returns None (use into_bytes for serialization).
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Packet::Raw(data) => Some(data),
+            Packet::Auth(_) => None,
         }
     }
 
@@ -56,6 +108,7 @@ impl Packet {
     pub fn len(&self) -> usize {
         match self {
             Packet::Raw(data) => data.len(),
+            Packet::Auth(msg) => postcard::to_allocvec(msg).map(|v| v.len()).unwrap_or(0),
         }
     }
 
@@ -80,6 +133,7 @@ impl From<Packet> for Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::firewall::PersonSecretKey;
 
     #[test]
     fn test_packet_raw_creation() {
@@ -140,5 +194,54 @@ mod tests {
         let packet = Packet::raw(vec![1, 2, 3, 4]);
         let cloned = packet.clone();
         assert_eq!(packet, cloned);
+    }
+
+    #[test]
+    fn test_packet_auth_creation() {
+        let person_secret = PersonSecretKey::generate();
+        let device_key = iroh::SecretKey::generate(&mut rand::rng()).public();
+        let claim = crate::firewall::OwnershipClaim::new(&person_secret, device_key, 3600);
+
+        let packet = Packet::auth(AuthMessage::Claim(claim.clone()));
+        assert!(matches!(packet, Packet::Auth(AuthMessage::Claim(_))));
+    }
+
+    #[test]
+    fn test_packet_auth_serialization() {
+        let person_secret = PersonSecretKey::generate();
+        let device_key = iroh::SecretKey::generate(&mut rand::rng()).public();
+        let claim = crate::firewall::OwnershipClaim::new(&person_secret, device_key, 3600);
+
+        let packet = Packet::auth(AuthMessage::Claim(claim));
+
+        // Serialize and deserialize
+        let serialized = postcard::to_allocvec(&packet).unwrap();
+        let deserialized: Packet = postcard::from_bytes(&serialized).unwrap();
+
+        assert_eq!(packet, deserialized);
+    }
+
+    #[test]
+    fn test_packet_auth_response() {
+        let packet = Packet::auth(AuthMessage::Response(AuthResponse::Accepted));
+        assert!(matches!(
+            packet,
+            Packet::Auth(AuthMessage::Response(AuthResponse::Accepted))
+        ));
+
+        let packet = Packet::auth(AuthMessage::Response(AuthResponse::Rejected {
+            reason: "Not trusted".to_string(),
+        }));
+        assert!(matches!(
+            packet,
+            Packet::Auth(AuthMessage::Response(AuthResponse::Rejected { .. }))
+        ));
+    }
+
+    #[test]
+    fn test_packet_auth_into_bytes() {
+        let packet = Packet::auth(AuthMessage::Response(AuthResponse::Accepted));
+        let bytes = packet.into_bytes();
+        assert!(!bytes.is_empty());
     }
 }

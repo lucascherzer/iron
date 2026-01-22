@@ -1,5 +1,6 @@
 pub mod dns;
 pub mod dns_config;
+pub mod firewall;
 pub mod keys;
 pub mod mapping;
 pub mod node;

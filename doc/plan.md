@@ -13,6 +13,69 @@
 - 🎉 **PROJECT COMPLETE** - All phases implemented and tested!
 - 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
+- 🔐 **Firewall Implementation**: IN PROGRESS - Core types and auth packets implemented
+
+## Recent Updates (Jan 22, 2026)
+
+### 🔐 Firewall with Device Ownership Claims - IN PROGRESS
+
+Implementing a whitelist-based firewall that allows trusting person identities instead of individual devices.
+
+#### Completed
+- ✅ **Core Types** (`src/firewall.rs`, ~450 lines)
+  - `PersonKey` - Ed25519 public keys for person identities
+  - `PersonSecretKey` - Private keys for signing ownership claims
+  - `OwnershipClaim` - Signed proof that a device belongs to a person
+  - `FirewallConfig` - Configuration with trusted persons and policies
+  - All types support serialization/deserialization
+  
+- ✅ **Authentication Packet Variants** (`src/packet.rs`)
+  - `Packet::Auth` variant with `AuthMessage` enum
+  - `AuthMessage::Claim` - carries ownership claim
+  - `AuthMessage::Response` - accept/reject authentication
+  - Backward compatible with existing `Packet::Raw`
+  
+- ✅ **Persistence Layer**
+  - `FirewallConfig::load()` / `save()` - JSON-based config storage
+  - `FirewallConfig::save_cache()` - Persistent verified devices cache
+  - Stored in `~/.config/iron/firewall.json` and `firewall_cache.json`
+  - Proper Unix permissions (0600 for files, 0700 for directory)
+  
+- ✅ **Test Coverage**
+  - 13 comprehensive firewall tests (all passing)
+  - 12 packet tests including auth variants (all passing)
+  - Signature verification, claim validation, expiry testing
+  - Config persistence, cache persistence
+  
+- ✅ **Dependencies Added**
+  - `ed25519-dalek = "2"` - Ed25519 signatures
+  - `serde_bytes = "0.11"` - Efficient byte array serialization
+
+#### TODO - Remaining Work
+- ⏸️ **Protocol Integration** - Add auth flow to `IronProtocol`
+  - Modify connection handler to require authentication when firewall enabled
+  - Cache verified devices persistently
+  - Send/receive auth packets before raw packets
+  
+- ⏸️ **CLI Commands** - Person key and firewall management
+  - `iron person add <name> <key>` - Add trusted person
+  - `iron person remove <name>` - Remove trusted person
+  - `iron person list` - Show trusted persons
+  - `iron person key generate` - Generate person keypair
+  - `iron firewall enable/disable` - Toggle firewall
+  - `iron claim generate` - Create ownership claim for current device
+  
+- ⏸️ **Integration Tests** - End-to-end firewall testing
+  - Test authentication flow between two nodes
+  - Test rejection of untrusted devices
+  - Test cache persistence across restarts
+
+#### Design Highlights
+- **Two-tier key system**: Person keys (long-term) + Device keys (iroh EndpointId)
+- **Singular ownership**: Each device has exactly one person key (MVP)
+- **Persistent caching**: Authentication happens once, cached until expiry/revocation
+- **Policy-based**: Flexible whitelist rules (person or specific device)
+- **Secure by default**: Claims expire after 1 year, signatures verified with Ed25519
 
 ## Recent Updates (Jan 21, 2026)
 
