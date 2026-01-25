@@ -63,6 +63,30 @@ impl Packet {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Returns true if this packet type requires reliable delivery
+    ///
+    /// # Transport Selection
+    ///
+    /// - **Raw packets (IP traffic)**: Returns `false` - Use QUIC datagrams
+    ///   - Unreliable, fast, zero overhead
+    ///   - IP layer is already unreliable, TCP handles retransmission
+    ///
+    /// - **Control/Metadata packets** (future): Returns `true` - Use QUIC streams
+    ///   - Reliable, ordered delivery guaranteed
+    ///   - Examples: Auth challenges, routing metadata, control messages
+    ///
+    /// This allows the protocol layer to choose the appropriate transport mechanism
+    /// based on packet semantics rather than always using one approach.
+    pub fn requires_reliability(&self) -> bool {
+        match self {
+            Packet::Raw(_) => false,
+            // Future variants that need reliability:
+            // Packet::Onion(_) => true,   // Multi-hop routing metadata
+            // Packet::Auth(_) => true,    // Authentication challenges
+            // Packet::Control(_) => true, // Network control messages
+        }
+    }
 }
 
 impl From<Vec<u8>> for Packet {
@@ -140,5 +164,14 @@ mod tests {
         let packet = Packet::raw(vec![1, 2, 3, 4]);
         let cloned = packet.clone();
         assert_eq!(packet, cloned);
+    }
+
+    #[test]
+    fn test_raw_packet_requires_no_reliability() {
+        let packet = Packet::raw(vec![1, 2, 3, 4]);
+        assert!(
+            !packet.requires_reliability(),
+            "Raw packets should use unreliable datagrams"
+        );
     }
 }

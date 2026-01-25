@@ -132,7 +132,9 @@ IPv6: fd69:726f:0000:0000:xxxx:xxxx:xxxx:xxxx
 - Main task: Orchestration and lifecycle management
 - DNS task: Hickory-server DNS resolver
 - TUN task: Packet processing loop
-- Iroh task: Connection management (integrated into IronNode)
+- Iroh send loop: Spawns concurrent tasks for each outbound packet (prevents head-of-line blocking)
+- Iroh accept loop: Accepts incoming connections and spawns handler tasks per connection
+- Connection handlers: One task per incoming connection, handles multiple streams sequentially
 
 ## Platform Support
 **Development Priority**: macOS-first, then Linux, then Windows

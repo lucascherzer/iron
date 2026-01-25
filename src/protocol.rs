@@ -4,14 +4,22 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use iroh::{Endpoint, EndpointId, Watcher};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, error, info, trace, warn};
 
 /// ALPN protocol identifier for iron packet transport
 pub const ALPN: &[u8] = b"iron/packet/0";
 
-/// Maximum packet size (MTU)
-const MAX_PACKET_SIZE: usize = 1500;
+/// Maximum concurrent send operations
+/// This limits concurrent QUIC datagram sends to prevent resource exhaustion
+const MAX_CONCURRENT_SENDS: usize = 100;
+
+/// Maximum concurrent receive operations
+/// This limits concurrent datagram handlers to prevent resource exhaustion
+const MAX_CONCURRENT_RECEIVES: usize = 100;
+
+/// Maximum packet size for stream reads (64KB - typical max IP packet size)
+const MAX_STREAM_PACKET_SIZE: usize = 65535;
 
 /// Iroh protocol handler for packet transport
 ///
@@ -27,6 +35,10 @@ pub struct IronProtocol {
     from_network_tx: mpsc::UnboundedSender<Packet>,
     /// Connection pool: maps EndpointId -> Connection for reuse
     connection_pool: Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
+    /// Semaphore to limit concurrent send operations
+    send_semaphore: Arc<Semaphore>,
+    /// Semaphore to limit concurrent receive operations
+    recv_semaphore: Arc<Semaphore>,
 }
 
 impl IronProtocol {
@@ -44,6 +56,8 @@ impl IronProtocol {
             to_network_rx,
             from_network_tx,
             connection_pool: Arc::new(DashMap::new()),
+            send_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS)),
+            recv_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_RECEIVES)),
         }
     }
 
@@ -56,10 +70,13 @@ impl IronProtocol {
         let endpoint = self.endpoint.clone();
         let from_network_tx = self.from_network_tx.clone();
         let registry = self.registry.clone();
+        let recv_semaphore = self.recv_semaphore.clone();
 
         // Spawn accept loop to handle incoming connections
         let accept_handle = tokio::spawn(async move {
-            if let Err(e) = Self::accept_loop(endpoint, registry, from_network_tx).await {
+            if let Err(e) =
+                Self::accept_loop(endpoint, registry, from_network_tx, recv_semaphore).await
+            {
                 error!("Accept loop failed: {}", e);
             }
         });
@@ -75,8 +92,16 @@ impl IronProtocol {
     }
 
     /// Send loop: reads packets from TUN and sends them to peers via QUIC
+    ///
+    /// Spawns a task for each packet to allow concurrent sending, preventing
+    /// head-of-line blocking when opening streams to different peers.
+    ///
+    /// Uses a semaphore to limit concurrent sends, preventing resource exhaustion.
     async fn send_loop(&mut self) -> Result<()> {
-        info!("Starting send loop");
+        info!(
+            "Starting send loop (max {} concurrent sends)",
+            MAX_CONCURRENT_SENDS
+        );
         let self_id = self.endpoint.id();
 
         while let Some((dest_endpoint_id, packet)) = self.to_network_rx.recv().await {
@@ -95,23 +120,58 @@ impl IronProtocol {
                 continue;
             }
 
-            if let Err(e) = self.send_packet(&dest_endpoint_id, &packet).await {
-                warn!("Failed to send packet to {}: {}", dest_endpoint_id, e);
-                // Continue processing other packets
-            }
+            // Clone necessary data for the spawned task
+            let endpoint = self.endpoint.clone();
+            let connection_pool = self.connection_pool.clone();
+            let registry = self.registry.clone();
+            let send_semaphore = self.send_semaphore.clone();
+
+            // Spawn task to send packet concurrently
+            // This prevents blocking the send loop when opening streams
+            tokio::spawn(async move {
+                // Acquire semaphore permit (blocks if at limit)
+                let _permit = send_semaphore.acquire().await.expect("Semaphore closed");
+
+                if let Err(e) = Self::send_packet_static(
+                    &endpoint,
+                    &connection_pool,
+                    &registry,
+                    &dest_endpoint_id,
+                    &packet,
+                )
+                .await
+                {
+                    warn!("Failed to send packet to {}: {}", dest_endpoint_id, e);
+                }
+                // Permit is automatically dropped here, releasing the semaphore
+            });
         }
 
         info!("Send loop terminated (channel closed)");
         Ok(())
     }
 
-    /// Sends a single packet to a peer
+    /// Sends a single packet to a peer (static version for spawned tasks)
     ///
     /// Uses connection pooling to reuse existing connections when possible,
     /// avoiding repeated handshakes.
-    async fn send_packet(&self, dest: &EndpointId, packet: &Packet) -> Result<()> {
+    ///
+    /// # Transport Selection
+    ///
+    /// Uses **dual transport** based on packet type:
+    /// - **Unreliable packets** (Raw IP): QUIC datagrams - zero overhead, fast
+    /// - **Reliable packets** (Control/Auth): QUIC streams - guaranteed delivery
+    ///
+    /// This allows control messages to be reliable while keeping IP forwarding fast.
+    async fn send_packet_static(
+        endpoint: &Endpoint,
+        connection_pool: &Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
+        _registry: &Arc<Registry>,
+        dest: &EndpointId,
+        packet: &Packet,
+    ) -> Result<()> {
         // Try to get existing connection from pool
-        let conn = if let Some(cached_conn) = self.connection_pool.get(dest) {
+        let conn = if let Some(cached_conn) = connection_pool.get(dest) {
             trace!("Reusing cached connection to {}", dest);
             cached_conn.value().clone()
         } else {
@@ -120,17 +180,16 @@ impl IronProtocol {
                 dest
             );
             // Create new connection
-            let new_conn = self
-                .endpoint
+            let new_conn = endpoint
                 .connect(*dest, ALPN)
                 .await
                 .context("Failed to connect to peer")?;
 
             // Cache it for future use
-            self.connection_pool.insert(*dest, new_conn.clone());
+            connection_pool.insert(*dest, new_conn.clone());
 
             // Log connection type for diagnostics
-            if let Some(mut conn_type_watcher) = self.endpoint.conn_type(*dest) {
+            if let Some(mut conn_type_watcher) = endpoint.conn_type(*dest) {
                 match conn_type_watcher.get() {
                     iroh::endpoint::ConnectionType::Direct(addr) => {
                         debug!("Direct connection established to {} via {}", dest, addr);
@@ -154,48 +213,108 @@ impl IronProtocol {
             new_conn
         };
 
-        trace!("Opening bi-directional stream to {}", dest);
-        // Open bi-directional stream
-        let stream_result = conn.open_bi().await;
-
-        let (mut send, _recv) = match stream_result {
-            Ok(s) => s,
-            Err(e) => {
-                // Connection might be stale, remove from pool and retry once
-                warn!(
-                    "Failed to open stream on cached connection to {}: {}",
-                    dest, e
-                );
-                self.connection_pool.remove(dest);
-
-                // Retry with new connection
-                trace!("Retrying with new connection to {}", dest);
-                let new_conn = self
-                    .endpoint
-                    .connect(*dest, ALPN)
-                    .await
-                    .context("Failed to connect to peer on retry")?;
-
-                self.connection_pool.insert(*dest, new_conn.clone());
-
-                new_conn
-                    .open_bi()
-                    .await
-                    .context("Failed to open bi-directional stream on retry")?
-            }
-        };
-
-        // Write packet data (extract raw bytes)
+        // Get packet bytes
         let packet_bytes = packet.as_bytes().context("Packet has no raw bytes")?;
-        send.write_all(packet_bytes)
-            .await
-            .context("Failed to write packet data")?;
 
-        // Finish stream (sends FIN)
-        send.finish().context("Failed to finish stream")?;
+        // Choose transport based on packet type
+        if packet.requires_reliability() {
+            // Use QUIC streams for reliable delivery (control messages, auth, etc.)
+            trace!(
+                "Sending reliable packet via stream to {} ({} bytes)",
+                dest,
+                packet_bytes.len()
+            );
 
-        debug!("Successfully sent packet to {}", dest);
+            let stream_result = conn.open_bi().await;
+            let (mut send, mut recv) = match stream_result {
+                Ok(s) => s,
+                Err(e) => {
+                    // Connection might be stale, remove from pool and retry once
+                    warn!(
+                        "Failed to open stream on cached connection to {}: {}",
+                        dest, e
+                    );
+                    connection_pool.remove(dest);
+
+                    // Retry with new connection
+                    trace!("Retrying with new connection to {}", dest);
+                    let new_conn = endpoint
+                        .connect(*dest, ALPN)
+                        .await
+                        .context("Failed to connect to peer on retry")?;
+
+                    connection_pool.insert(*dest, new_conn.clone());
+
+                    new_conn
+                        .open_bi()
+                        .await
+                        .context("Failed to open bi-directional stream on retry")?
+                }
+            };
+
+            // Write packet data
+            send.write_all(packet_bytes)
+                .await
+                .context("Failed to write packet data")?;
+
+            // Finish send stream (sends FIN)
+            send.finish().context("Failed to finish stream")?;
+
+            // Stop receive stream (we don't expect data back)
+            recv.stop(0u32.into())
+                .context("Failed to stop receive stream")?;
+
+            debug!("Successfully sent reliable packet to {}", dest);
+        } else {
+            // Use QUIC datagrams for unreliable delivery (IP packets)
+            // Check datagram size limit
+            let max_size = conn
+                .max_datagram_size()
+                .context("Datagrams not supported by peer")?;
+
+            if packet_bytes.len() > max_size {
+                return Err(anyhow::anyhow!(
+                    "Packet too large for datagram: {} bytes (max {})",
+                    packet_bytes.len(),
+                    max_size
+                ));
+            }
+
+            trace!(
+                "Sending unreliable packet via datagram to {} ({} bytes)",
+                dest,
+                packet_bytes.len()
+            );
+
+            conn.send_datagram(bytes::Bytes::copy_from_slice(packet_bytes))
+                .map_err(|e| {
+                    // Connection might be stale, remove from pool
+                    connection_pool.remove(dest);
+                    anyhow::anyhow!("Failed to send datagram: {}", e)
+                })?;
+
+            debug!("Successfully sent unreliable packet to {}", dest);
+        }
+
         Ok(())
+    }
+
+    /// Sends a single packet to a peer
+    ///
+    /// Uses connection pooling to reuse existing connections when possible,
+    /// avoiding repeated handshakes.
+    ///
+    /// This is a convenience wrapper around send_packet_static for use in tests.
+    #[allow(dead_code)]
+    async fn send_packet(&self, dest: &EndpointId, packet: &Packet) -> Result<()> {
+        Self::send_packet_static(
+            &self.endpoint,
+            &self.connection_pool,
+            &self.registry,
+            dest,
+            packet,
+        )
+        .await
     }
 
     /// Accept loop: accepts incoming connections and receives packets
@@ -203,8 +322,13 @@ impl IronProtocol {
         endpoint: Endpoint,
         registry: Arc<Registry>,
         from_network_tx: mpsc::UnboundedSender<Packet>,
+        recv_semaphore: Arc<Semaphore>,
     ) -> Result<()> {
-        info!("Starting accept loop on {}", endpoint.id());
+        info!(
+            "Starting accept loop on {} (max {} concurrent receives)",
+            endpoint.id(),
+            MAX_CONCURRENT_RECEIVES
+        );
 
         loop {
             // Accept incoming connection
@@ -251,9 +375,16 @@ impl IronProtocol {
             // Spawn task to handle this connection
             let registry = registry.clone();
             let from_network_tx = from_network_tx.clone();
+            let recv_semaphore = recv_semaphore.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(conn, sender_id, registry, from_network_tx).await
+                if let Err(e) = Self::handle_connection(
+                    conn,
+                    sender_id,
+                    registry,
+                    from_network_tx,
+                    recv_semaphore,
+                )
+                .await
                 {
                     warn!("Connection handler failed for {}: {}", sender_id, e);
                 }
@@ -265,75 +396,162 @@ impl IronProtocol {
 
     /// Handles a single connection from a peer
     ///
-    /// This function loops to handle multiple streams on the same connection,
-    /// allowing for connection reuse and avoiding repeated handshakes.
+    /// This function uses dual transport to receive packets:
+    /// - QUIC datagrams for unreliable packets (IP traffic - fast, zero overhead)
+    /// - QUIC streams for reliable packets (future control messages - guaranteed delivery)
+    ///
+    /// Uses tokio::select! to wait on both simultaneously, spawning tasks for each
+    /// incoming message to process concurrently and prevent head-of-line blocking.
+    ///
+    /// Uses a semaphore to limit concurrent handlers, preventing resource exhaustion.
     async fn handle_connection(
         conn: iroh::endpoint::Connection,
         sender_id: EndpointId,
         registry: Arc<Registry>,
         from_network_tx: mpsc::UnboundedSender<Packet>,
+        recv_semaphore: Arc<Semaphore>,
     ) -> Result<()> {
         debug!(
-            "Handling connection from {}, accepting streams...",
+            "Handling connection from {}, reading datagrams and streams...",
             sender_id
         );
 
-        // Loop to handle multiple streams on this connection
+        // Loop to read incoming datagrams and streams using dual transport
         loop {
-            trace!("Waiting for bi-directional stream from {}", sender_id);
+            trace!("Waiting for datagram or stream from {}", sender_id);
 
-            // Accept bi-directional stream
-            let stream_result = conn.accept_bi().await;
+            tokio::select! {
+                // Handle incoming streams (reliable packets)
+                stream_result = conn.accept_bi() => {
+                    let (send, recv) = match stream_result {
+                        Ok(streams) => streams,
+                        Err(e) => {
+                            // Connection closed or error - this is normal when peer closes connection
+                            debug!("Connection from {} closed while accepting stream: {}", sender_id, e);
+                            break;
+                        }
+                    };
 
-            let (mut send, mut recv) = match stream_result {
-                Ok(s) => s,
-                Err(e) => {
-                    // Connection closed or error - this is normal when peer closes connection
-                    debug!("Connection from {} closed: {}", sender_id, e);
-                    break;
+                    // Spawn task to handle this stream concurrently
+                    let registry = registry.clone();
+                    let from_network_tx = from_network_tx.clone();
+                    let recv_semaphore = recv_semaphore.clone();
+                    tokio::spawn(async move {
+                        // Acquire semaphore permit (blocks if at limit)
+                        let _permit = recv_semaphore.acquire().await.expect("Semaphore closed");
+
+                        if let Err(e) = Self::handle_stream(send, recv, sender_id, registry, from_network_tx).await {
+                            warn!("Stream handler failed for {}: {}", sender_id, e);
+                        }
+                        // Permit is automatically dropped here, releasing the semaphore
+                    });
                 }
-            };
 
-            // Read packet data
-            let packet = match recv.read_to_end(MAX_PACKET_SIZE).await {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("Failed to read packet from {}: {}", sender_id, e);
-                    continue; // Try next stream
+                // Handle incoming datagrams (unreliable packets)
+                datagram_result = conn.read_datagram() => {
+                    let datagram = match datagram_result {
+                        Ok(d) => d,
+                        Err(e) => {
+                            // Connection closed or error - this is normal when peer closes connection
+                            debug!("Connection from {} closed while reading datagram: {}", sender_id, e);
+                            break;
+                        }
+                    };
+
+                    // Spawn task to handle this datagram concurrently
+                    let registry = registry.clone();
+                    let from_network_tx = from_network_tx.clone();
+                    let recv_semaphore = recv_semaphore.clone();
+                    tokio::spawn(async move {
+                        // Acquire semaphore permit (blocks if at limit)
+                        let _permit = recv_semaphore.acquire().await.expect("Semaphore closed");
+
+                        if let Err(e) = Self::handle_datagram(datagram, sender_id, registry, from_network_tx).await {
+                            warn!("Datagram handler failed for {}: {}", sender_id, e);
+                        }
+                        // Permit is automatically dropped here, releasing the semaphore
+                    });
                 }
-            };
-
-            debug!(
-                "Received packet from {} ({} bytes)",
-                sender_id,
-                packet.len()
-            );
-
-            // Rewrite source address to sender's derived IPv6
-            // This ensures the OS sees the correct source for routing return packets
-            let packet_with_correct_source =
-                match Self::rewrite_source_address(packet, &sender_id, &registry) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("Failed to rewrite source address for {}: {}", sender_id, e);
-                        continue; // Try next stream
-                    }
-                };
-
-            trace!("Forwarding packet to TUN with rewritten source");
-            // Forward packet to TUN (wrap in Packet type)
-            if let Err(e) = from_network_tx.send(Packet::raw(packet_with_correct_source)) {
-                error!("Failed to send packet to TUN: {}", e);
-                break; // TUN channel closed, exit
-            }
-
-            // Close send side
-            if let Err(e) = send.finish() {
-                warn!("Failed to finish send stream for {}: {}", sender_id, e);
             }
         }
 
         debug!("Connection handler for {} exiting", sender_id);
+        Ok(())
+    }
+
+    /// Handles a single stream (one reliable packet) from a peer
+    ///
+    /// Reads the packet data from the stream, rewrites the source address,
+    /// and forwards it to the TUN interface. Properly cleans up the stream
+    /// after processing.
+    async fn handle_stream(
+        mut send: iroh::endpoint::SendStream,
+        mut recv: iroh::endpoint::RecvStream,
+        sender_id: EndpointId,
+        registry: Arc<Registry>,
+        from_network_tx: mpsc::UnboundedSender<Packet>,
+    ) -> Result<()> {
+        debug!("Received stream from {}", sender_id);
+
+        // Read all data from the stream
+        let data = match recv.read_to_end(MAX_STREAM_PACKET_SIZE).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Failed to read from stream: {}", e);
+                // Stop the recv stream to signal error
+                recv.stop(0u32.into()).ok();
+                return Err(anyhow::anyhow!("Failed to read stream: {}", e));
+            }
+        };
+
+        debug!(
+            "Received stream data from {} ({} bytes)",
+            sender_id,
+            data.len()
+        );
+
+        // Rewrite source address to sender's derived IPv6
+        let packet_with_correct_source = Self::rewrite_source_address(data, &sender_id, &registry)
+            .context("Failed to rewrite source address")?;
+
+        trace!("Forwarding stream packet to TUN with rewritten source");
+        // Forward packet to TUN (wrap in Packet type)
+        from_network_tx
+            .send(Packet::raw(packet_with_correct_source))
+            .context("Failed to send packet to TUN")?;
+
+        // Clean up stream properly: finish send side, stop recv side
+        send.finish().ok();
+        recv.stop(0u32.into()).ok();
+
+        Ok(())
+    }
+
+    /// Handles a single datagram (one packet) from a peer
+    async fn handle_datagram(
+        datagram: bytes::Bytes,
+        sender_id: EndpointId,
+        registry: Arc<Registry>,
+        from_network_tx: mpsc::UnboundedSender<Packet>,
+    ) -> Result<()> {
+        debug!(
+            "Received datagram from {} ({} bytes)",
+            sender_id,
+            datagram.len()
+        );
+
+        // Rewrite source address to sender's derived IPv6
+        // This ensures the OS sees the correct source for routing return packets
+        let packet_with_correct_source =
+            Self::rewrite_source_address(datagram.to_vec(), &sender_id, &registry)
+                .context("Failed to rewrite source address")?;
+
+        trace!("Forwarding packet to TUN with rewritten source");
+        // Forward packet to TUN (wrap in Packet type)
+        from_network_tx
+            .send(Packet::raw(packet_with_correct_source))
+            .context("Failed to send packet to TUN")?;
+
         Ok(())
     }
 
@@ -414,11 +632,6 @@ mod tests {
     fn test_alpn_constant() {
         assert_eq!(ALPN, b"iron/packet/0");
         assert_eq!(ALPN.len(), 13);
-    }
-
-    #[test]
-    fn test_max_packet_size_constant() {
-        assert_eq!(MAX_PACKET_SIZE, 1500);
     }
 
     #[test]
