@@ -6,7 +6,7 @@
 
 ## Features
 
-- 🌐 **Virtual IPv6 Network**: Each peer gets a unique IPv6 address in the `fd69:726f::/32` space
+- 🌐 **Virtual Overlay Network**: Each peer is addressed by their public key
 - 🔒 **Encrypted P2P**: All traffic encrypted via iroh's QUIC protocol
 - 🏷️ **DNS Resolution**: `.iron` domain names resolve to peer IPv6 addresses
 - 🔌 **TUN Interface**: Standard network interface, works with any application
@@ -39,22 +39,25 @@
 └────────────────────────────────────────┘
 ```
 
-## Installation
+## Building
 
-### Prerequisites
-
-- Rust 1.70+ (2024 edition)
-- Root/sudo privileges (required for TUN device creation)
-
-### Build from Source
+Prerequisites:
+- nix
 
 ```bash
-git clone https://github.com/yourusername/iron.git
-cd iron
-cargo build --release
+# build for your system
+nix build .#default
+# build for an explicit target
+nix build .#packages.x86_64-linux.default
 ```
 
-The binary will be at `target/release/iron`.
+The binary will be at `result/bin/iron`.
+
+## Testing
+
+```bash
+nix flake check
+```
 
 ## Usage
 
@@ -368,22 +371,19 @@ RUST_LOG=iron::dns=debug,iron::tun=trace,iron=info sudo iron serve
 
 ## Development
 
+A development shell with all build dependencies is provided via
+```sh
+nix develop
+```
+
 ### Running Tests
 
 ```bash
+# via nix:
+nix flake check # this includes further checks like linting and CVE checks
+# via cargo (unit and integration tests only):
 cargo test
 ```
-
-All 42 tests should pass:
-- 26 unit tests (including 4 key persistence tests in `keys.rs`)
-- 16 integration tests (including 7 key persistence tests)
-
-### Helper Scripts
-
-Located in `scripts/`:
-- `node-id-to-dns.sh` - Convert hex Node ID to base32 DNS name
-- `test-dns.sh` - Test DNS resolution interactively
-- `test-interactive.sh` - Comprehensive interactive tests
 
 ### Building Documentation
 
@@ -391,29 +391,6 @@ Located in `scripts/`:
 cargo doc --open --no-deps
 ```
 
-### Code Structure
-
-```
-iron/
-├── src/
-│   ├── lib.rs           # Library exports
-│   ├── keys.rs          # Key persistence and generation
-│   ├── mapping.rs       # EndpointId ↔ IPv6 registry
-│   ├── dns.rs           # DNS resolver for .iron
-│   ├── dns_config.rs    # DNS auto-configuration
-│   ├── tun.rs           # TUN interface packet handling
-│   ├── protocol.rs      # Iroh QUIC packet transport
-│   ├── node.rs          # Component orchestration
-│   └── bin/
-│       └── iron.rs      # Main binary entry point
-├── tests/
-│   └── integration.rs   # Integration tests
-└── doc/
-    ├── arch.md          # Architecture decisions
-    ├── plan.md          # Implementation plan
-    ├── packet-flow.md   # Detailed packet flow
-    └── networking.md    # Network specifications
-```
 
 ## Technical Details
 
