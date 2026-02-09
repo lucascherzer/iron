@@ -8,9 +8,11 @@ Iron uses **microvm.nix** to create lightweight NixOS VMs for automated integrat
 
 ## Test Suites
 
-### 1. Smoke Test (`tests/vm/smoke-test.nix`)
+### 1. Smoke Test - Binary (`tests/vm/smoke-test.nix`)
 
-A minimal test that verifies iron can start and perform basic operations in a VM.
+A minimal test that verifies the iron **binary** can start and perform basic operations in a VM.
+
+**Testing approach:** Direct binary execution with manual service management.
 
 **What it tests:**
 - ✅ Binary availability
@@ -27,7 +29,41 @@ A minimal test that verifies iron can start and perform basic operations in a VM
 nix build .#checks.x86_64-linux.iron-vm-smoke-test
 ```
 
-### 2. Two-Node Test (`tests/vm/two-node-test.nix`)
+### 2. Smoke Test - Module (`tests/vm/smoke-test-module.nix`)
+
+A comprehensive test that validates the **NixOS module** (`nixosModules.iron`) works correctly in a real NixOS VM.
+
+**Testing approach:** Uses the flake's production NixOS module configuration.
+
+**What it tests:**
+- ✅ Module imports and configuration
+- ✅ Systemd service creation and startup
+- ✅ Service configuration (log level, DNS port)
+- ✅ Service lifecycle (restart behavior)
+- ✅ Security hardening (capabilities, sandboxing)
+- ✅ All basic functionality (keys, DNS, TUN, etc.)
+- ✅ Log accessibility via journalctl
+
+**Why this matters:** This test validates what users would actually deploy. If the module configuration breaks, this test catches it.
+
+**Run time:** ~30-60 seconds
+
+**Usage:**
+```bash
+nix build .#checks.x86_64-linux.iron-vm-smoke-test-module
+```
+
+**Comparison:**
+
+| Aspect | Binary Test | Module Test |
+|--------|-------------|-------------|
+| **Tests** | `iron` binary directly | `nixosModules.iron` module |
+| **Service** | Manual background process | systemd service via module |
+| **Use Case** | Binary functionality | Production deployment config |
+| **Restart** | Manual control | systemd Restart=on-failure |
+| **Logs** | stdout/stderr to file | journalctl integration |
+
+### 3. Two-Node Test (`tests/vm/two-node-test.nix`)
 
 A comprehensive test that verifies P2P connectivity between two iron nodes.
 
@@ -46,7 +82,7 @@ A comprehensive test that verifies P2P connectivity between two iron nodes.
 nix build .#checks.x86_64-linux.iron-vm-two-node-test
 ```
 
-### 3. Reliability Test (`tests/vm/reliability-test.nix`)
+### 4. Reliability Test (`tests/vm/reliability-test.nix`)
 
 A comprehensive test suite that verifies TCP reliability and data integrity under adverse network conditions.
 
@@ -79,15 +115,20 @@ This will run:
 - Cargo clippy
 - Cargo fmt check
 - Cargo audit
-- VM smoke test (Linux only)
+- VM smoke test - binary (Linux only)
+- VM smoke test - module (Linux only)
 - VM two-node test (Linux only)
 - VM reliability test (Linux only)
+```
 
 ### Run Individual VM Tests
 
 ```bash
-# Smoke test only
+# Smoke test (binary) only
 nix build .#checks.x86_64-linux.iron-vm-smoke-test
+
+# Smoke test (module) only
+nix build .#checks.x86_64-linux.iron-vm-smoke-test-module
 
 # Two-node test only
 nix build .#checks.x86_64-linux.iron-vm-two-node-test

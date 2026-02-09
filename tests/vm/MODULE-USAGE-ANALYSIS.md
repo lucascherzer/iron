@@ -147,19 +147,36 @@ This gets complex quickly and defeats the purpose.
 
 ## Decision
 
-**Keep current approach:**
-- Manual service definitions in tests
-- Full control for testing scenarios
-- Clear, explicit configuration
-- Easy to understand and debug
+**Hybrid approach implemented:**
 
-**Add comment in tests explaining why:**
+1. **Smoke Test (Module)** - `tests/vm/smoke-test-module.nix`
+   - Uses `nixosModules.iron` to validate the production module
+   - Tests what users would actually deploy
+   - Validates module configuration and systemd integration
+   - **Purpose:** Module validation and "happy path" testing
+
+2. **Smoke Test (Binary)** - `tests/vm/smoke-test.nix`
+   - Manual service definition for direct binary testing
+   - Tests iron binary functionality independently
+   - **Purpose:** Binary validation and basic functionality
+
+3. **Reliability/Chaos Tests** - `tests/vm/reliability-test.nix`, etc.
+   - Manual service definitions with custom restart policies
+   - Full control for chaos engineering (packet loss, disconnects)
+   - **Purpose:** Edge cases, fault injection, stress testing
+
+**Rationale:**
+- **Module validation is important** - we ship `nixosModules.iron`, so we should test it
+- **Flexibility still needed** - chaos tests require fine-grained control
+- **Best of both worlds** - validate module + maintain test flexibility
+
+**Add comment in chaos tests explaining why they don't use the module:**
 ```nix
-# Note: We don't use nixosModules.iron because tests need:
-# - Direct control over restart behavior (chaos testing)
-# - Flexibility for edge case scenarios
-# - Explicit configuration for debugging
-# The module is tested separately via integration checks.
+# Note: We don't use nixosModules.iron in reliability tests because:
+# - Need Restart = "always" with 2s delay (faster recovery for chaos tests)
+# - Module uses Restart = "on-failure" with 5s delay (production setting)
+# - Tests require direct control for fault injection scenarios
+# The module itself is validated in smoke-test-module.nix
 ```
 
 ## Related Considerations
@@ -198,9 +215,16 @@ But this adds complexity for a rare use case.
 
 ## Conclusion
 
-**Status Quo is Best:**
-- Tests: Manual service definitions (current approach) ✅
+**Hybrid Approach Adopted:**
+- **smoke-test-module.nix**: Uses `nixosModules.iron` to validate the module ✅
+- **smoke-test.nix**: Manual definition for binary testing ✅
+- **reliability-test.nix**: Manual definition for chaos testing ✅
 - Production: Use nixosModules.iron (already documented) ✅
-- Keep them separate with clear purposes
 
-The 15 lines of boilerplate per test is acceptable for the flexibility and clarity it provides.
+This gives us:
+- ✅ Module validation (ensures `nixosModules.iron` actually works)
+- ✅ Binary validation (tests iron independently)
+- ✅ Test flexibility (chaos tests can control service behavior)
+- ✅ Real-world testing (module test uses production config)
+
+The small amount of duplication (two smoke tests) is worthwhile for comprehensive coverage.

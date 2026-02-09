@@ -102,6 +102,18 @@
               echo "VM smoke test skipped (Linux only)" > $out
             '';
 
+          iron-vm-smoke-test-module = if pkgs.stdenv.isLinux then
+            import ./tests/vm/smoke-test-module.nix {
+              inherit pkgs;
+              ironPackage = iron;
+              nixosModule = self.nixosModules.iron;
+            }
+          else
+            # Skip VM tests on non-Linux platforms
+            pkgs.runCommand "iron-vm-smoke-test-module-skipped" {} ''
+              echo "VM smoke test (module) skipped (Linux only)" > $out
+            '';
+
           iron-vm-two-node-test = if pkgs.stdenv.isLinux then
             import ./tests/vm/two-node-test.nix {
               inherit pkgs;
