@@ -13,7 +13,7 @@ implementing unit- and integration tests.
 
 # Tests
 
-Simple tests that can be modeled as "this function should produce these outputs
+Simple unit tests that can be modeled as "this function should produce these outputs
 given these inputs" can and should be implemented following this pattern:
 
 ```rs
@@ -28,6 +28,12 @@ fn test_add() {
     }
 }
 ```
+
+### Integration tests
+
+We use microvm.nix in tests/vm/ for a bunch of integration tests that require
+more than one machine to test.
+This is necessary, as we can not send data to loopback via the iron interface.
 
 # Code Style
 
