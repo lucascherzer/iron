@@ -9,9 +9,13 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
+    microvm = {
+      url = "github:astro/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, crane, flake-utils, advisory-db, ... }:
+  outputs = { self, nixpkgs, crane, flake-utils, advisory-db, microvm, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -85,6 +89,40 @@
             inherit (commonArgs) src;
             inherit advisory-db;
           };
+
+          # VM-based integration tests (Linux only)
+          iron-vm-smoke-test = if pkgs.stdenv.isLinux then
+            import ./tests/vm/smoke-test.nix {
+              inherit pkgs;
+              ironPackage = iron;
+            }
+          else
+            # Skip VM tests on non-Linux platforms
+            pkgs.runCommand "iron-vm-smoke-test-skipped" {} ''
+              echo "VM smoke test skipped (Linux only)" > $out
+            '';
+
+          iron-vm-two-node-test = if pkgs.stdenv.isLinux then
+            import ./tests/vm/two-node-test.nix {
+              inherit pkgs;
+              ironPackage = iron;
+            }
+          else
+            # Skip VM tests on non-Linux platforms
+            pkgs.runCommand "iron-vm-two-node-test-skipped" {} ''
+              echo "VM two-node test skipped (Linux only)" > $out
+            '';
+
+          iron-vm-reliability-test = if pkgs.stdenv.isLinux then
+            import ./tests/vm/reliability-test.nix {
+              inherit pkgs;
+              ironPackage = iron;
+            }
+          else
+            # Skip VM tests on non-Linux platforms
+            pkgs.runCommand "iron-vm-reliability-test-skipped" {} ''
+              echo "VM reliability test skipped (Linux only)" > $out
+            '';
         };
 
         # `nix develop`
