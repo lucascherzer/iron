@@ -8,6 +8,88 @@ These helpers provide reusable functionality for testing iron's network reliabil
 
 ## Files
 
+### `smoke_test_binary.py`
+
+Binary smoke test helper for basic iron functionality validation.
+
+**Purpose:** Test the iron binary directly with manual service management in a VM environment.
+
+**Features:**
+- Key generation and persistence
+- Node identity validation
+- TUN interface verification
+- DNS server startup and resolution
+- IPv6 ULA space validation
+- Manual daemon startup for debugging
+
+**Usage:**
+
+```python
+# In NixOS VM test script
+testScript = ''
+  # Import the helper module
+  ${builtins.readFile ./helpers/smoke_test_binary.py}
+  
+  # Run the test
+  main(machine)
+'';
+```
+
+**What it tests:**
+- ✅ Binary availability
+- ✅ Key generation and storage
+- ✅ Node information (JSON format)
+- ✅ IPv6 address assignment
+- ✅ Domain name format
+- ✅ Iron daemon startup
+- ✅ TUN interface creation
+- ✅ DNS resolution (self)
+
+### `smoke_test_module.py`
+
+Module smoke test helper for nixosModules.iron validation.
+
+**Purpose:** Validate that the flake's NixOS module works correctly in a real VM deployment.
+
+**Features:**
+- Module configuration testing
+- Systemd service integration
+- Service lifecycle management
+- Security hardening validation
+- Journalctl log verification
+- Production deployment validation
+
+**Usage:**
+
+```python
+# In NixOS VM test script
+testScript = ''
+  # Import the helper module
+  ${builtins.readFile ./helpers/smoke_test_module.py}
+  
+  # Run the test
+  main(machine)
+'';
+```
+
+**What it tests:**
+- ✅ Module imports and enables correctly
+- ✅ Systemd service starts via module
+- ✅ Module options (logLevel, dnsPort) applied
+- ✅ Service restart behavior
+- ✅ All basic functionality from binary test
+- ✅ Journalctl integration
+- ✅ Production configuration works
+
+**Comparison:**
+
+| Aspect | Binary Helper | Module Helper |
+|--------|---------------|---------------|
+| **Service** | Manual background process | systemd via module |
+| **Purpose** | Binary functionality | Module deployment |
+| **Restart** | Manual control | systemd Restart policy |
+| **Logs** | stdout to file | journalctl |
+
 ### `gen_data.py`
 
 Deterministic pseudo-random data generator for reproducible testing.
@@ -195,7 +277,9 @@ tests/vm/
 
 ## See Also
 
-- `../reliability-test.nix` - Uses these helpers extensively
+- `../smoke-test.nix` - Uses smoke_test_binary.py
+- `../smoke-test-module.nix` - Uses smoke_test_module.py
+- `../reliability-test.nix` - Uses gen_data.py and receive_tcp.py
 - `../../doc/vm-testing.md` - Overall VM testing architecture
 - `gen_data.py` docstring - Detailed API documentation
 - `receive_tcp.py` docstring - TCP receiver API
