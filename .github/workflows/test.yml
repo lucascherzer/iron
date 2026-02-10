@@ -2,9 +2,9 @@ name: CI Tests
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
 
 jobs:
   nix-checks:
@@ -26,27 +26,18 @@ jobs:
         uses: cachix/cachix-action@v13
         with:
           name: iron-p2p
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           skipPush: ${{ github.event_name == 'pull_request' }}
-
-      - name: Check Nix flake
-        run: nix flake check --show-trace
 
       - name: Build iron
         run: nix build .#iron
 
-      - name: Run unit tests
-        run: nix build .#checks.x86_64-linux.iron-test
-
-      - name: Run clippy
-        run: nix build .#checks.x86_64-linux.iron-clippy
-
-      - name: Check formatting
-        run: nix build .#checks.x86_64-linux.iron-fmt
-
-      - name: Run security audit
-        run: nix build .#checks.x86_64-linux.iron-audit
-        continue-on-error: true  # Don't fail on advisory warnings
+      - name: Run non-VM checks
+        run: |
+          nix build .#checks.x86_64-linux.iron-test --show-trace
+          nix build .#checks.x86_64-linux.iron-clippy --show-trace
+          nix build .#checks.x86_64-linux.iron-fmt --show-trace
+          nix build .#checks.x86_64-linux.iron-audit --show-trace || true
 
   vm-tests:
     name: VM Integration Tests
@@ -67,7 +58,7 @@ jobs:
         uses: cachix/cachix-action@v13
         with:
           name: iron-p2p
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           skipPush: ${{ github.event_name == 'pull_request' }}
 
       - name: Enable KVM group perms
@@ -112,7 +103,7 @@ jobs:
         uses: cachix/cachix-action@v13
         with:
           name: iron-p2p
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           skipPush: ${{ github.event_name == 'pull_request' }}
 
       - name: Build iron for macOS

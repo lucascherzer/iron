@@ -198,7 +198,7 @@ pkgs.testers.runNixOSTest {
     for port in range(10000, 10005):
         nodeA.succeed(
             f"python3 /helpers/receive_tcp.py --port {port} "
-            f"> /tmp/hash_{port}.txt 2>&1 &"
+            f"> /tmp/hash_{port}.txt 2> /tmp/recv_{port}.log &"
         )
 
     nodeA.sleep(2)

@@ -4,7 +4,7 @@ This document describes the automated testing infrastructure for iron using NixO
 
 ## Overview
 
-Iron uses **microvm.nix** to create lightweight NixOS VMs for automated integration testing. This allows us to test real P2P connectivity between iron nodes in isolated environments.
+Iron uses the **NixOS test framework** (`pkgs.testers.runNixOSTest`) to create lightweight QEMU-based NixOS VMs for automated integration testing. This allows us to test real P2P connectivity between iron nodes in isolated environments.
 
 ## Test Suites
 

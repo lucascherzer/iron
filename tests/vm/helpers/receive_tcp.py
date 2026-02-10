@@ -30,50 +30,46 @@ def receive_data(
     Returns:
         Tuple of (hash_hex, bytes_received)
     """
-    # Create IPv6 socket
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Create IPv6 socket with context manager
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    if timeout:
-        sock.settimeout(timeout)
+        if timeout:
+            sock.settimeout(timeout)
 
-    try:
         sock.bind((bind_address, port))
         sock.listen(1)
 
         print(f"Listening on [{bind_address}]:{port}...", file=sys.stderr, flush=True)
 
         conn, addr = sock.accept()
-        print(f"Connection from {addr}", file=sys.stderr, flush=True)
+        with conn:
+            print(f"Connection from {addr}", file=sys.stderr, flush=True)
 
-        hasher = hashlib.sha256()
-        total_received = 0
+            hasher = hashlib.sha256()
+            total_received = 0
 
-        # Receive data in chunks
-        while True:
-            data = conn.recv(65536)
-            if not data:
-                break
+            # Receive data in chunks
+            while True:
+                data = conn.recv(65536)
+                if not data:
+                    break
 
-            hasher.update(data)
-            total_received += len(data)
+                hasher.update(data)
+                total_received += len(data)
 
-            # Optional progress reporting
-            if expected_size and total_received % (1024 * 1024) == 0:
-                progress = (total_received / expected_size) * 100
-                print(
-                    f"Progress: {total_received}/{expected_size} bytes ({progress:.1f}%)",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                # Optional progress reporting
+                if expected_size and total_received % (1024 * 1024) == 0:
+                    progress = (total_received / expected_size) * 100
+                    print(
+                        f"Progress: {total_received}/{expected_size} bytes ({progress:.1f}%)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
-        conn.close()
-        print(f"Received {total_received} bytes total", file=sys.stderr, flush=True)
+            print(f"Received {total_received} bytes total", file=sys.stderr, flush=True)
 
-        return hasher.hexdigest(), total_received
-
-    finally:
-        sock.close()
+            return hasher.hexdigest(), total_received
 
 
 def main():

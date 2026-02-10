@@ -104,9 +104,29 @@ pkgs.testers.runNixOSTest {
     nodeA.succeed("systemctl status iron.service")
     nodeB.succeed("systemctl status iron.service")
 
-    # Test 2: Verify TUN interface exists on both nodes
-    nodeA.succeed("ip link show utun0 || ip link show | grep utun")
-    nodeB.succeed("ip link show utun0 || ip link show | grep utun")
+    # Test 2: Verify TUN interface exists on both nodes by parsing from logs
+    # Extract TUN device names from iron logs
+    import re
+
+    logA = nodeA.succeed("journalctl -u iron.service --no-pager")
+    logB = nodeB.succeed("journalctl -u iron.service --no-pager")
+
+    # Parse interface names from "TUN device created: <name>" log line
+    tunA_match = re.search(r"TUN device created: (\S+)", logA)
+    tunB_match = re.search(r"TUN device created: (\S+)", logB)
+
+    assert tunA_match, "Could not find TUN device creation in nodeA logs"
+    assert tunB_match, "Could not find TUN device creation in nodeB logs"
+
+    tunA_name = tunA_match.group(1)
+    tunB_name = tunB_match.group(1)
+
+    print(f"Node A TUN device: {tunA_name}")
+    print(f"Node B TUN device: {tunB_name}")
+
+    # Verify the interfaces actually exist
+    nodeA.succeed(f"ip link show {tunA_name}")
+    nodeB.succeed(f"ip link show {tunB_name}")
 
     # Test 3: Get node identities
     nodeA_info = nodeA.succeed("iron self --format json")

@@ -22,9 +22,17 @@ def main(machine):
     machine.succeed("which iron")
     print("✓ iron binary found")
 
-    # Test 2: Generate a key (required for iron to start)
-    machine.succeed("iron key generate --save --force")
-    print("✓ Generated iron key")
+    # Test 2: Check if key exists, generate if needed
+    key_exists = machine.succeed("iron self --exists || echo 'no-key'").strip()
+    if "no-key" in key_exists:
+        # Generate key before service tries to start
+        machine.succeed("iron key generate --save")
+        print("✓ Generated iron key")
+        # Restart service now that key exists
+        machine.succeed("systemctl restart iron.service")
+        print("✓ Restarted iron.service with new key")
+    else:
+        print("✓ Key already exists")
 
     # Test 3: Verify key was created
     machine.succeed("iron self --exists")
@@ -72,9 +80,22 @@ def main(machine):
     machine.succeed("pgrep -f 'iron serve'")
     print("✓ iron serve process is running")
 
-    # Test 10: Verify TUN interface was created
-    tun_output = machine.succeed("ip link show | grep utun || ip link show")
-    print(f"✓ Network interfaces available:\n{tun_output}")
+    # Test 10: Verify TUN interface was created by checking logs
+    # Extract the TUN device name from iron's logs
+    import re
+
+    log_output = machine.succeed("journalctl -u iron.service --no-pager")
+    print(f"Iron service logs:\n{log_output}")
+
+    # Parse interface name from "TUN device created: <name>" log line
+    tun_match = re.search(r"TUN device created: (\S+)", log_output)
+    assert tun_match, "Could not find TUN device creation in logs"
+    tun_name = tun_match.group(1)
+    print(f"✓ TUN device name: {tun_name}")
+
+    # Verify the interface actually exists
+    machine.succeed(f"ip link show {tun_name}")
+    print(f"✓ TUN interface {tun_name} exists")
 
     # Test 11: Verify DNS is listening on configured port
     machine.succeed("ss -tuln | grep :5333")

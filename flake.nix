@@ -9,13 +9,9 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
-    microvm = {
-      url = "github:astro/microvm.nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
-  outputs = { self, nixpkgs, crane, flake-utils, advisory-db, microvm, ... }:
+  outputs = { self, nixpkgs, crane, flake-utils, advisory-db, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};

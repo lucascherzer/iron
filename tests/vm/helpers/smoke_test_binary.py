@@ -60,9 +60,22 @@ def main(machine):
     machine.succeed("iron serve --log-level debug 2>&1 | tee /tmp/iron.log &")
     machine.sleep(5)
 
-    # Test 8: Verify TUN interface was created
-    tun_output = machine.succeed("ip link show | grep utun || ip link show")
-    print(f"Network interfaces:\n{tun_output}")
+    # Test 8: Verify TUN interface was created by parsing from logs
+    # Extract the TUN device name from iron's logs
+    log_output = machine.succeed("cat /tmp/iron.log")
+    print(f"Iron logs:\n{log_output}")
+
+    # Parse interface name from "TUN device created: <name>" log line
+    import re
+
+    tun_match = re.search(r"TUN device created: (\S+)", log_output)
+    assert tun_match, "Could not find TUN device creation in logs"
+    tun_name = tun_match.group(1)
+    print(f"✓ TUN device name: {tun_name}")
+
+    # Verify the interface actually exists
+    machine.succeed(f"ip link show {tun_name}")
+    print(f"✓ TUN interface {tun_name} exists")
 
     # Test 9: Verify iron process is running
     machine.succeed("pgrep -f 'iron serve'")

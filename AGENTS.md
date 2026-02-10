@@ -31,9 +31,11 @@ fn test_add() {
 
 ### Integration tests
 
-We use microvm.nix in tests/vm/ for a bunch of integration tests that require
-more than one machine to test.
-This is necessary, as we can not send data to loopback via the iron interface.
+VM-based integration tests live in tests/vm/ and are implemented using the
+NixOS test framework (`pkgs.testers.runNixOSTest`). Use these tests for
+scenarios that require more than one machine or realistic networking/storage
+interactions. This is necessary, as we cannot send data to loopback via the
+iron interface.
 
 # Code Style
 
