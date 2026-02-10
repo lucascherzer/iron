@@ -222,7 +222,11 @@ impl IronProtocol {
             };
 
             let sender_id = conn.remote_id();
-            debug!("Accepted connection from {}", sender_id);
+            let base32_id = data_encoding::BASE32_NOPAD
+                .encode(sender_id.as_bytes())
+                .to_lowercase();
+
+            debug!("Accepted connection from {}", base32_id);
 
             // Log connection type for diagnostics
             if let Some(mut conn_type_watcher) = endpoint.conn_type(sender_id) {
