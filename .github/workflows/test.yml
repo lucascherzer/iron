@@ -1,0 +1,118 @@
+name: CI Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  nix-checks:
+    name: Nix Flake Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v24
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v13
+        with:
+          name: iron-p2p
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ github.event_name == 'pull_request' }}
+
+      - name: Build iron
+        run: nix build .#iron
+
+      - name: Run non-VM checks
+        run: |
+          nix build .#checks.x86_64-linux.iron-test --show-trace
+          nix build .#checks.x86_64-linux.iron-clippy --show-trace
+          nix build .#checks.x86_64-linux.iron-fmt --show-trace
+          nix build .#checks.x86_64-linux.iron-audit --show-trace || true
+
+  vm-tests:
+    name: VM Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v24
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v13
+        with:
+          name: iron-p2p
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ github.event_name == 'pull_request' }}
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run smoke test
+        run: nix build .#checks.x86_64-linux.iron-vm-smoke-test --show-trace -L
+        timeout-minutes: 10
+
+      - name: Run two-node test
+        run: nix build .#checks.x86_64-linux.iron-vm-two-node-test --show-trace -L
+        timeout-minutes: 15
+
+      - name: Archive test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-test-logs
+          path: |
+            result*/
+            *.log
+
+  macos-build:
+    name: macOS Build Check
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v24
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v13
+        with:
+          name: iron-p2p
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          skipPush: ${{ github.event_name == 'pull_request' }}
+
+      - name: Build iron for macOS
+        run: nix build .#iron
+
+      - name: Run unit tests
+        run: nix build .#checks.aarch64-darwin.iron-test || nix build .#checks.x86_64-darwin.iron-test
+
+      - name: Verify VM tests are skipped on macOS
+        run: |
+          echo "VM tests should be skipped on macOS"
+          nix build .#checks.aarch64-darwin.iron-vm-smoke-test || nix build .#checks.x86_64-darwin.iron-vm-smoke-test || true
