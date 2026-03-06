@@ -205,7 +205,7 @@
               description = ''
                 Path to the node secret key file.  The key is generated on
                 first startup if absent.  Defaults to
-                <filename>/var/lib/iron/secret.key</filename>.
+                /var/lib/iron/secret.key.
               '';
             };
 
@@ -215,7 +215,7 @@
               description = ''
                 Path to the known peers cache file written on shutdown and read
                 on startup.  Defaults to
-                <filename>/var/lib/iron/known_peers.json</filename>.
+                /var/lib/iron/known_peers.json.
               '';
             };
 

@@ -6,6 +6,8 @@ use crate::protocol::IronProtocol;
 use crate::tun::TunInterface;
 use anyhow::Result;
 use iroh::Endpoint;
+use iroh::RelayMap;
+use iroh::endpoint::RelayMode;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -55,8 +57,13 @@ impl IronNode {
 
         // Initialize iroh endpoint with persistent key
         info!("Creating iroh endpoint");
+        let relay_mode = match config.relays {
+            Some(relays) => RelayMode::Custom(RelayMap::from_iter(relays)),
+            None => RelayMode::Default,
+        };
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
+            .relay_mode(relay_mode)
             .alpns(vec![crate::protocol::ALPN.to_vec()])
             .bind()
             .await?;
