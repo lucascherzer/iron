@@ -154,6 +154,30 @@
         with lib;
         let
           cfg = config.services.iron;
+          pkg = self.packages.${pkgs.system}.iron;
+
+          # Synthesise a TOML config from the declared options.
+          # The file is written to the Nix store (read-only) and passed to the
+          # daemon via --config.  Mutable runtime state (key, peers cache) lives
+          # under StateDirectory (/var/lib/iron) which the binary selects
+          # automatically when running as root — so path options are only
+          # emitted when the user explicitly overrides the defaults.
+          configFile = pkgs.writeText "iron.toml" (
+            optionalString (cfg.keyFile != "/var/lib/iron/secret.key") (
+              "key_file = \"${cfg.keyFile}\"\n"
+            )
+            + optionalString (cfg.knownPeersFile != "/var/lib/iron/known_peers.json") (
+              "known_peers_file = \"${cfg.knownPeersFile}\"\n"
+            )
+            + optionalString (cfg.relays != []) (
+              "relays = [${concatMapStringsSep ", " (r: ''"${r}"'') cfg.relays}]\n"
+            ) + ''
+
+              [firewall]
+              enable = ${boolToString cfg.firewall.enable}
+            '' + optionalString (cfg.firewall.file != null) (
+              "file = \"${cfg.firewall.file}\"\n"
+            ));
         in {
           options.services.iron = {
             enable = mkEnableOption "iron P2P network interface";
@@ -161,13 +185,69 @@
             logLevel = mkOption {
               type = types.str;
               default = "info";
-              description = "Log level (trace, debug, info, warn, error)";
+              description = "Log level (trace, debug, info, warn, error).";
             };
 
             dnsPort = mkOption {
               type = types.port;
               default = 5333;
-              description = "DNS server port";
+              description = "DNS server port.";
+            };
+
+            # ── Paths ──────────────────────────────────────────────────────────
+            # Both default to /var/lib/iron/ which is created and owned by the
+            # service via StateDirectory.  Override only if you want to supply
+            # an externally managed key (e.g. from a secrets manager).
+
+            keyFile = mkOption {
+              type = types.path;
+              default = "/var/lib/iron/secret.key";
+              description = ''
+                Path to the node secret key file.  The key is generated on
+                first startup if absent.  Defaults to
+                <filename>/var/lib/iron/secret.key</filename>.
+              '';
+            };
+
+            knownPeersFile = mkOption {
+              type = types.path;
+              default = "/var/lib/iron/known_peers.json";
+              description = ''
+                Path to the known peers cache file written on shutdown and read
+                on startup.  Defaults to
+                <filename>/var/lib/iron/known_peers.json</filename>.
+              '';
+            };
+
+            # ── Relay servers ──────────────────────────────────────────────────
+
+            relays = mkOption {
+              type = types.listOf types.str;
+              default = [];
+              description = ''
+                Relay server URLs.  An empty list (the default) uses iroh's
+                built-in relay infrastructure.
+              '';
+              example = [ "https://relay.example.com" ];
+            };
+
+            # ── Firewall ───────────────────────────────────────────────────────
+
+            firewall = {
+              enable = mkOption {
+                type = types.bool;
+                default = true;
+                description = "Whether the iron packet firewall is active.";
+              };
+
+              file = mkOption {
+                type = types.nullOr types.path;
+                default = null;
+                description = ''
+                  Path to the firewall rules JSON file.  When null the default
+                  path inside the state directory is used.
+                '';
+              };
             };
           };
 
@@ -178,9 +258,17 @@
               wantedBy = [ "multi-user.target" ];
 
               serviceConfig = {
-                ExecStart = "${self.packages.${pkgs.system}.iron}/bin/iron serve --log-level ${cfg.logLevel} --dns-port ${toString cfg.dnsPort}";
+                ExecStart = "${pkg}/bin/iron serve"
+                  + " --config ${configFile}"
+                  + " --log-level ${cfg.logLevel}"
+                  + " --dns-port ${toString cfg.dnsPort}";
                 Restart = "on-failure";
                 RestartSec = 5;
+
+                # /var/lib/iron is created and chowned to the service user
+                # automatically by systemd.
+                StateDirectory = "iron";
+                StateDirectoryMode = "0700";
 
                 # Security hardening
                 CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];

@@ -26,6 +26,10 @@ struct Cli {
     #[arg(long, default_value = "5333", global = true)]
     dns_port: u16,
 
+    /// Path to config file (default: ~/.config/iron/iron.toml)
+    #[arg(long, global = true, value_name = "FILE")]
+    config: Option<std::path::PathBuf>,
+
     /// Remove DNS configuration for .iron domains (manual cleanup)
     #[arg(long)]
     cleanup_dns: bool,
@@ -207,14 +211,21 @@ async fn main() -> Result<()> {
     // Parse config — missing file is a soft warning, anything else is fatal.
     // `convert` and `resolve` don't need config; for all other commands we
     // resolve it here so the path is authoritative throughout.
-    let config = match IronConfig::parse() {
-        Ok(cfg) => cfg,
-        Err(ConfigError::CouldNotOpen(_)) => {
-            eprintln!("WARN: No config file found, using defaults.");
-            eprintln!("      Run `iron vanity` to generate a custom node identity.");
-            IronConfig::default()
+    //
+    // Priority: --config flag > default location (~/.config/iron/iron.toml).
+    let config = if let Some(ref path) = cli.config {
+        // Explicit path: a missing file IS an error (user asked for it).
+        IronConfig::parse_file(path).map_err(anyhow::Error::from)?
+    } else {
+        match IronConfig::parse() {
+            Ok(cfg) => cfg,
+            Err(ConfigError::CouldNotOpen(_)) => {
+                eprintln!("WARN: No config file found, using defaults.");
+                eprintln!("      Run `iron vanity` to generate a custom node identity.");
+                IronConfig::default()
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => return Err(e.into()),
     };
 
     // Handle subcommands

@@ -10,8 +10,23 @@ pub const DEFAULT_FIREWALL_FILENAME: &str = "firewall.json";
 pub const DEFAULT_KEY_FILENAME: &str = "secret.key";
 pub const DEFAULT_KNOWN_PEERS_FILENAME: &str = "known_peers.json";
 
-/// Returns `~/.config/iron` as an absolute path, using `$HOME`.
+/// System-wide state directory used when running as root (e.g. the NixOS
+/// systemd service).  Per-user config lives under `~/.config/iron` instead.
+#[cfg(unix)]
+const ROOT_STATE_DIR: &str = "/var/lib/iron";
+
+/// Returns the default config directory.
+///
+/// - When the effective UID is 0 (root / system service): `/var/lib/iron`
+/// - Otherwise: `$HOME/.config/iron`
+///
+/// This ensures the binary and the NixOS module agree on the same paths
+/// without any explicit overrides in the module config.
 fn default_config_dir() -> Result<PathBuf, ConfigError> {
+    #[cfg(unix)]
+    if nix::unistd::Uid::effective().is_root() {
+        return Ok(PathBuf::from(ROOT_STATE_DIR));
+    }
     let home = std::env::var("HOME").map_err(|_| ConfigError::NoHomeDir)?;
     Ok(PathBuf::from(home).join(DEFAULT_CONFIG_DIR))
 }
@@ -99,8 +114,10 @@ pub struct FirewallConfig {
 /// Iron node configuration with all values resolved to their concrete types.
 ///
 /// Obtain via [`IronConfig::parse`], [`IronConfig::parse_file`], or
-/// [`IronConfig::parse_str`]. Values absent from the config file fall back to
-/// sensible defaults (paths under `~/.config/iron/`, firewall enabled).
+/// [`IronConfig::parse_str`].  Values absent from the config file fall back to
+/// sensible defaults.  Default paths are root-aware:
+/// - root / system service → `/var/lib/iron/`
+/// - regular user          → `~/.config/iron/`
 #[derive(Debug)]
 pub struct IronConfig {
     /// Path to the node's secret key file.
@@ -124,7 +141,12 @@ impl Default for IronConfig {
 }
 
 impl IronConfig {
-    /// Parse the config from its default location (`~/.config/iron/iron.toml`).
+    /// Parse the config from its default location.
+    ///
+    /// Looks in `/var/lib/iron/iron.toml` when running as root, otherwise
+    /// `~/.config/iron/iron.toml`.  Returns [`ConfigError::CouldNotOpen`] if
+    /// the file does not exist (caller should treat this as a soft warning and
+    /// fall back to [`IronConfig::default`]).
     pub fn parse() -> Result<Self, ConfigError> {
         let p = default_config_dir()?.join(DEFAULT_CONFIG_FILENAME);
         Self::parse_file(&p)
