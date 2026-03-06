@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use iroh::EndpointId;
 use std::net::Ipv6Addr;
-use std::path::PathBuf;
+use std::path::Path;
 use tracing::{debug, trace, warn};
 
 /// Manages the bi-directional mapping between Iroh EndpointIds and IPv6 addresses.
@@ -116,20 +116,9 @@ impl Registry {
         )
     }
 
-    /// Returns the path to the known peers file
+    /// Saves known peer EndpointIds to disk for persistence across restarts.
     ///
-    /// Stored in ~/.config/iron for persistence across restarts
-    fn known_peers_path() -> Result<PathBuf, std::io::Error> {
-        let home = std::env::var("HOME").map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "HOME environment variable not set",
-            )
-        })?;
-        Ok(PathBuf::from(home).join(".config/iron/known_peers.json"))
-    }
-
-    /// Saves known peer EndpointIds to disk for persistence across restarts
+    /// `path` should come from [`crate::config::IronConfig::known_peers_file`].
     ///
     /// This prevents the issue where applications cache IPv6 addresses but iron
     /// loses the corresponding EndpointId mappings on restart.
@@ -149,17 +138,15 @@ impl Registry {
     ///
     /// # Security
     ///
-    /// - File is stored in ~/.config/iron with 0600 permissions
-    /// - Only saves EndpointIds that were legitimately discovered (via DNS or incoming connections)
-    /// - Never "guesses" EndpointIds - only remembers verified peers
-    pub fn save_peers(&self) -> Result<(), std::io::Error> {
+    /// - File is stored with 0600 permissions.
+    /// - Only saves EndpointIds that were legitimately discovered (via DNS or incoming connections).
+    /// - Never "guesses" EndpointIds - only remembers verified peers.
+    pub fn save_peers(&self, path: &Path) -> Result<(), std::io::Error> {
         use std::fs;
         use std::io::Write;
 
-        let peers_path = Self::known_peers_path()?;
-
         // Ensure directory exists
-        if let Some(parent) = peers_path.parent() {
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
@@ -180,7 +167,7 @@ impl Registry {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         // Write atomically using temp file + rename
-        let temp_path = peers_path.with_extension("json.tmp");
+        let temp_path = path.with_extension("json.tmp");
         let mut file = fs::File::create(&temp_path)?;
 
         // Set restrictive permissions (0600 - owner read/write only)
@@ -194,31 +181,29 @@ impl Registry {
 
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
-        fs::rename(temp_path, &peers_path)?;
+        fs::rename(temp_path, path)?;
 
-        debug!("Saved {} known peers to {:?}", peers.len(), peers_path);
+        debug!("Saved {} known peers to {:?}", peers.len(), path);
         Ok(())
     }
 
-    /// Loads known peer EndpointIds from disk
+    /// Loads known peer EndpointIds from disk.
     ///
-    /// This is called at startup to restore previously discovered peers,
-    /// preventing issues with cached IPv6 addresses in applications.
+    /// `path` should come from [`crate::config::IronConfig::known_peers_file`].
     ///
-    /// For each EndpointId, derives the corresponding IPv6 address and
-    /// populates the registry mappings.
-    pub fn load_peers(&self) -> Result<usize, std::io::Error> {
+    /// Called at startup to restore previously discovered peers, preventing
+    /// issues with cached IPv6 addresses in applications. For each EndpointId,
+    /// derives the corresponding IPv6 address and populates the registry mappings.
+    pub fn load_peers(&self, path: &Path) -> Result<usize, std::io::Error> {
         use std::fs;
 
-        let peers_path = Self::known_peers_path()?;
-
         // If file doesn't exist, that's okay - just starting fresh
-        if !peers_path.exists() {
-            debug!("No known peers file found at {:?}", peers_path);
+        if !path.exists() {
+            debug!("No known peers file found at {:?}", path);
             return Ok(0);
         }
 
-        let contents = fs::read_to_string(&peers_path)?;
+        let contents = fs::read_to_string(path)?;
 
         // Deserialize from JSON (array of base32-encoded EndpointIds)
         let peer_ids: Vec<String> = serde_json::from_str(&contents)
@@ -260,7 +245,7 @@ impl Registry {
             loaded += 1;
         }
 
-        debug!("Loaded {} known peers from {:?}", loaded, peers_path);
+        debug!("Loaded {} known peers from {:?}", loaded, path);
         Ok(loaded)
     }
 }

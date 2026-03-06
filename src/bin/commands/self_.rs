@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use iron::keys;
 use serde_json::json;
+use std::path::Path;
 
 pub fn run(
+    key_file: &Path,
     format: Option<String>,
     hex: bool,
     base32: bool,
@@ -12,14 +14,14 @@ pub fn run(
 ) -> Result<()> {
     // Handle --exists flag (just check and exit)
     if exists {
-        match keys::load_key() {
+        match keys::load_key_at(key_file) {
             Ok(_) => std::process::exit(0),
             Err(_) => std::process::exit(1),
         }
     }
 
     // Load the key
-    let secret_key = keys::load_key().context(
+    let secret_key = keys::load_key_at(key_file).context(
         "No key file found\n\n\
         Run 'iron' once to generate a key, or use 'iron vanity' to create a custom key.",
     )?;
@@ -57,9 +59,8 @@ pub fn run(
     if let Some(fmt) = format {
         match fmt.to_lowercase().as_str() {
             "json" => {
-                let key_path = keys::key_path();
                 let output = json!({
-                    "key_file": key_path.to_string_lossy(),
+                    "key_file": key_file.to_string_lossy(),
                     "key_exists": true,
                     "node_id": {
                         "hex": hex_id,
@@ -82,11 +83,9 @@ pub fn run(
     }
 
     // Default: pretty output
-    let key_path = keys::key_path();
-
     println!("\nIron Node Identity:");
-    println!("  Key file:  {}", key_path.display());
-    println!("  Status:    ✓ Key found");
+    println!("  Key file:  {}", key_file.display());
+    println!("  Status:    Key found");
     println!();
     println!("Node ID:");
     println!("  Hex:       {}", hex_id);

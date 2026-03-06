@@ -1,13 +1,14 @@
 use anyhow::{Result, anyhow};
 use iroh::SecretKey;
-use iron::keys;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub fn run(
+    default_key_path: &Path,
     prefix: String,
     threads: Option<usize>,
     max_attempts: Option<u64>,
@@ -211,10 +212,8 @@ pub fn run(
                 println!("✓ Key saved to: {}", output_path);
             }
         } else {
-            let key_path = keys::key_path();
-
             // Check if key already exists
-            if key_path.exists() && !quiet {
+            if default_key_path.exists() && !quiet {
                 print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
                 io::stdout().flush()?;
                 let mut input = String::new();
@@ -229,18 +228,18 @@ pub fn run(
             }
 
             // Try to save the key
-            let key_path_str = key_path
+            let key_path_str = default_key_path
                 .to_str()
                 .ok_or_else(|| anyhow!("Key path contains invalid UTF-8"))?;
             match save_key_to_file(&result.secret_key, key_path_str) {
                 Ok(_) => {
                     if !quiet {
-                        println!("✓ Key saved to: {}", key_path.display());
+                        println!("Key saved to: {}", default_key_path.display());
                     }
                 }
                 Err(e) if e.to_string().contains("Permission denied") => {
                     println!();
-                    println!("⚠️  Permission denied. The key directory may be owned by root.");
+                    println!("Permission denied. The key directory may be owned by root.");
                     println!();
                     println!("Solutions:");
                     println!("1. Run iron daemon once (as root) to fix permissions:");

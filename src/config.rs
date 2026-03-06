@@ -113,6 +113,16 @@ pub struct IronConfig {
     pub firewall: FirewallConfig,
 }
 
+impl Default for IronConfig {
+    /// Returns a default config with all values resolved from `$HOME`.
+    ///
+    /// Equivalent to parsing an empty TOML string. Panics only if `$HOME` is
+    /// not set, which is always a fatal misconfiguration.
+    fn default() -> Self {
+        Self::parse_str("").expect("default config resolution requires $HOME to be set")
+    }
+}
+
 impl IronConfig {
     /// Parse the config from its default location (`~/.config/iron/iron.toml`).
     pub fn parse() -> Result<Self, ConfigError> {

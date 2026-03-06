@@ -1,3 +1,4 @@
+use crate::config::IronConfig;
 use crate::dns::DnsResolver;
 use crate::keys;
 use crate::mapping::Registry;
@@ -5,6 +6,7 @@ use crate::protocol::IronProtocol;
 use crate::tun::TunInterface;
 use anyhow::Result;
 use iroh::Endpoint;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -15,14 +17,16 @@ pub struct IronNode {
     dns: DnsResolver,
     tun: TunInterface,
     protocol: IronProtocol,
+    /// Path used for persisting the known-peers cache on shutdown.
+    known_peers_file: PathBuf,
 }
 
 impl IronNode {
-    /// Creates a new IronNode with all components initialized
+    /// Creates a new IronNode with all components initialized, driven by `config`.
     ///
     /// This sets up:
     /// - Registry for EndpointId <-> IPv6 mapping
-    /// - Iroh endpoint for QUIC connections
+    /// - Iroh endpoint for QUIC connections (using the key at `config.key_file`)
     /// - DNS resolver for `.iron` domains
     /// - TUN interface for packet interception
     /// - Protocol handler for packet transport
@@ -32,14 +36,14 @@ impl IronNode {
     /// Returns an error if:
     /// - Iroh endpoint fails to bind
     /// - Any component initialization fails
-    pub async fn new() -> Result<Self> {
+    pub async fn new(config: IronConfig) -> Result<Self> {
         info!("Initializing IronNode");
 
         // Create shared registry
         let registry = Arc::new(Registry::new());
 
         // Load previously known peers to prevent issues with cached IPv6 addresses
-        match registry.load_peers() {
+        match registry.load_peers(&config.known_peers_file) {
             Ok(count) if count > 0 => info!("Loaded {} known peers from cache", count),
             Ok(_) => info!("No cached peers found, starting fresh"),
             Err(e) => warn!("Failed to load peers cache: {}", e),
@@ -47,7 +51,7 @@ impl IronNode {
 
         // Load or generate persistent secret key
         info!("Loading node identity");
-        let secret_key = keys::load_or_generate_key()?;
+        let secret_key = keys::load_or_generate_key_at(&config.key_file)?;
 
         // Initialize iroh endpoint with persistent key
         info!("Creating iroh endpoint");
@@ -94,17 +98,28 @@ impl IronNode {
             dns,
             tun,
             protocol,
+            known_peers_file: config.known_peers_file,
         })
     }
 
-    /// Returns the EndpointId of this node
+    /// Returns the EndpointId of this node.
     pub fn endpoint_id(&self) -> iroh::EndpointId {
         self.endpoint.id()
     }
 
-    /// Returns a reference to the shared registry
+    /// Returns a reference to the shared registry.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// Returns the path used to persist the known-peers cache.
+    pub fn known_peers_file(&self) -> &std::path::Path {
+        &self.known_peers_file
+    }
+
+    /// Persist the known-peers cache to `self.known_peers_file`.
+    pub fn save_peers(&self) -> Result<(), std::io::Error> {
+        self.registry.save_peers(&self.known_peers_file)
     }
 
     /// Orchestrates the startup of all components.

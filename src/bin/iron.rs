@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iron::IronNode;
+use iron::config::{ConfigError, IronConfig};
 use iron::dns_config;
 use tracing::{error, info};
 
@@ -203,11 +204,24 @@ async fn main() -> Result<()> {
         return dns_config::cleanup_dns();
     }
 
+    // Parse config — missing file is a soft warning, anything else is fatal.
+    // `convert` and `resolve` don't need config; for all other commands we
+    // resolve it here so the path is authoritative throughout.
+    let config = match IronConfig::parse() {
+        Ok(cfg) => cfg,
+        Err(ConfigError::CouldNotOpen(_)) => {
+            eprintln!("WARN: No config file found, using defaults.");
+            eprintln!("      Run `iron vanity` to generate a custom node identity.");
+            IronConfig::default()
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     // Handle subcommands
     match cli.command {
         Some(Command::Serve) => {
             // Start daemon
-            start_daemon(cli.log_level, cli.dns_port).await?;
+            start_daemon(config, cli.log_level, cli.dns_port).await?;
         }
         Some(Command::Convert { value, to }) => {
             commands::convert::run(value, to)?;
@@ -220,7 +234,7 @@ async fn main() -> Result<()> {
             ipv6,
             exists,
         }) => {
-            commands::self_::run(format, hex, base32, domain, ipv6, exists)?;
+            commands::self_::run(&config.key_file, format, hex, base32, domain, ipv6, exists)?;
         }
         Some(Command::Vanity {
             prefix,
@@ -230,26 +244,34 @@ async fn main() -> Result<()> {
             output,
             quiet,
         }) => {
-            commands::vanity::run(prefix, threads, max_attempts, save, output, quiet)?;
+            commands::vanity::run(
+                &config.key_file,
+                prefix,
+                threads,
+                max_attempts,
+                save,
+                output,
+                quiet,
+            )?;
         }
         Some(Command::Key { command }) => match command {
             KeyCommand::Info { path } => {
-                commands::key::info(path)?;
+                commands::key::info(&config.key_file, path)?;
             }
             KeyCommand::Export { format, output } => {
-                commands::key::export(format, output)?;
+                commands::key::export(&config.key_file, format, output)?;
             }
             KeyCommand::Import { file, save } => {
-                commands::key::import(file, save)?;
+                commands::key::import(&config.key_file, file, save)?;
             }
             KeyCommand::Generate { save, force } => {
-                commands::key::generate(save, force)?;
+                commands::key::generate(&config.key_file, save, force)?;
             }
             KeyCommand::Validate { path } => {
-                commands::key::validate(path)?;
+                commands::key::validate(&config.key_file, path)?;
             }
             KeyCommand::Reset { confirm } => {
-                commands::key::reset(confirm)?;
+                commands::key::reset(&config.key_file, confirm)?;
             }
         },
         Some(Command::Resolve {
@@ -274,7 +296,7 @@ async fn main() -> Result<()> {
 }
 
 /// Start the iron daemon (default behavior)
-async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
+async fn start_daemon(config: IronConfig, log_level: String, dns_port: u16) -> Result<()> {
     // Display banner
     print_banner(&log_level, dns_port);
 
@@ -284,17 +306,18 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
 
     // Fix key directory ownership if needed (before dropping privileges)
     #[cfg(unix)]
-    fix_key_directory_ownership()?;
+    fix_key_directory_ownership(&config.key_file)?;
 
     // Setup DNS configuration automatically
     setup_dns_for_daemon()?;
 
     // Initialize and start iron node
     info!("Initializing iron node...");
-    let node = IronNode::new().await?;
+    let node = IronNode::new(config).await?;
 
-    // Get a reference to the registry for saving on shutdown
+    // Capture save capability before node is consumed by start()
     let registry = node.registry().clone();
+    let known_peers_file = node.known_peers_file().to_owned();
 
     // Display node information
     info!("Iron node initialized successfully");
@@ -367,15 +390,15 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
         error!("Failed to cleanup DNS: {}", e);
         error!("You may need to manually cleanup with: sudo iron --cleanup-dns");
     } else {
-        info!("✓ DNS configuration removed");
+        info!("DNS configuration removed");
     }
 
     // Save known peers for next startup
     info!("Saving known peers...");
-    if let Err(e) = registry.save_peers() {
+    if let Err(e) = registry.save_peers(&known_peers_file) {
         error!("Failed to save peers cache: {}", e);
     } else {
-        info!("✓ Peers cache saved");
+        info!("Peers cache saved");
     }
 
     match shutdown_result {
@@ -405,19 +428,19 @@ fn setup_dns_for_daemon() -> Result<()> {
         dns_config::Platform::MacOS | dns_config::Platform::LinuxSystemd => {
             match dns_config::setup_dns() {
                 Ok(_) => {
-                    info!("✓ DNS configured successfully");
+                    info!("DNS configured successfully");
                     Ok(())
                 }
                 Err(e) => {
                     error!("Failed to setup DNS: {}", e);
-                    info!("⚠️  DNS setup failed, but iron will continue running.");
+                    info!("DNS setup failed, but iron will continue running.");
                     info!("You can manually cleanup later with: sudo iron --cleanup-dns");
                     Ok(())
                 }
             }
         }
         dns_config::Platform::LinuxOther => {
-            info!("⚠️  Automatic DNS setup not available for your system.");
+            info!("Automatic DNS setup not available for your system.");
             info!("Please configure DNS manually to resolve .iron domains");
             Ok(())
         }
@@ -478,18 +501,19 @@ fn check_root() {
     // TUN device creation will fail with appropriate error message if privileges are insufficient
 }
 
-/// Fix key directory ownership if it's owned by root
-/// This happens when the daemon creates the directory as root
+/// Fix key directory ownership if it's owned by root.
+///
+/// This happens when the daemon creates the directory as root. The key file
+/// path comes from the parsed config so no hardcoded paths are needed here.
 #[cfg(unix)]
-fn fix_key_directory_ownership() -> Result<()> {
+fn fix_key_directory_ownership(key_file: &std::path::Path) -> Result<()> {
     use anyhow::Context;
     use nix::unistd::User;
     use std::env;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
-    let key_path = iron::keys::key_path();
-    let config_dir = key_path
+    let config_dir = key_file
         .parent()
         .context("Cannot determine config directory")?;
 
@@ -536,7 +560,7 @@ fn fix_key_directory_ownership() -> Result<()> {
                     ));
                 }
 
-                info!("✓ Key directory ownership fixed");
+                info!("Key directory ownership fixed");
             }
         }
     }

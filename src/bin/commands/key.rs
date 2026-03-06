@@ -3,10 +3,11 @@ use iroh::SecretKey;
 use iron::keys;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn info(path: Option<String>) -> Result<()> {
-    let key_path = path_or_default(path)?;
+/// Show key information. If `path` is given it overrides `default_key_path`.
+pub fn info(default_key_path: &Path, path: Option<String>) -> Result<()> {
+    let key_path = path_or_default(default_key_path, path);
 
     if !key_path.exists() {
         anyhow::bail!("Key file not found: {}", key_path.display());
@@ -29,9 +30,10 @@ pub fn info(path: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn export(format: String, output: Option<String>) -> Result<()> {
-    let secret_key =
-        keys::load_key().context("No key found. Generate one with: iron key generate")?;
+/// Export the default key to stdout or a file.
+pub fn export(default_key_path: &Path, format: String, output: Option<String>) -> Result<()> {
+    let secret_key = keys::load_key_at(default_key_path)
+        .context("No key found. Generate one with: iron key generate")?;
     let bytes = secret_key.to_bytes();
 
     let encoded = match format.to_lowercase().as_str() {
@@ -42,7 +44,7 @@ pub fn export(format: String, output: Option<String>) -> Result<()> {
 
     if let Some(output_path) = output {
         fs::write(&output_path, &encoded)?;
-        println!("✓ Key exported to: {}", output_path);
+        println!("Key exported to: {}", output_path);
     } else {
         println!("{}", encoded);
     }
@@ -50,7 +52,9 @@ pub fn export(format: String, output: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn import(file: String, save: bool) -> Result<()> {
+/// Import a key from a hex/base64 file. If `save` is true it overwrites
+/// `default_key_path`.
+pub fn import(default_key_path: &Path, file: String, save: bool) -> Result<()> {
     let content = fs::read_to_string(&file)
         .context(format!("Failed to read file: {}", file))?
         .trim()
@@ -75,12 +79,11 @@ pub fn import(file: String, save: bool) -> Result<()> {
     let secret_key = SecretKey::from_bytes(&bytes_array);
     let endpoint_id = secret_key.public();
 
-    println!("✓ Valid key imported");
+    println!("Valid key imported");
     println!("  Node ID: {}", hex::encode(endpoint_id.as_bytes()));
 
     if save {
-        let key_path = keys::key_path();
-        if key_path.exists() {
+        if default_key_path.exists() {
             print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
             io::stdout().flush()?;
             let mut input = String::new();
@@ -91,19 +94,21 @@ pub fn import(file: String, save: bool) -> Result<()> {
             }
         }
 
-        // Save key (using the internal save function)
-        save_key_bytes(&key_path, &bytes)?;
-        println!("✓ Key saved to: {}", key_path.display());
+        // Save key
+        save_key_bytes(default_key_path, &bytes)?;
+        println!("Key saved to: {}", default_key_path.display());
     }
 
     Ok(())
 }
 
-pub fn generate(save: bool, force: bool) -> Result<()> {
+/// Generate a new random key. If `save` is true it is written to
+/// `default_key_path`.
+pub fn generate(default_key_path: &Path, save: bool, force: bool) -> Result<()> {
     let secret_key = SecretKey::generate(&mut rand::rng());
     let endpoint_id = secret_key.public();
 
-    println!("✓ New key generated");
+    println!("New key generated");
     println!("  Node ID (hex): {}", hex::encode(endpoint_id.as_bytes()));
 
     let base32_id = data_encoding::BASE32_NOPAD
@@ -112,9 +117,7 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
     println!("  Domain:        {}.iron", base32_id);
 
     if save {
-        let key_path = keys::key_path();
-
-        if key_path.exists() && !force {
+        if default_key_path.exists() && !force {
             println!("\nWARNING: This will overwrite your existing key.");
             println!("You will get a new Node ID and .iron domain.");
             print!("Generate new key? (y/N) ");
@@ -127,30 +130,31 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
             }
         }
 
-        save_key_bytes(&key_path, &secret_key.to_bytes())?;
-        println!("\n✓ Key saved to: {}", key_path.display());
+        save_key_bytes(default_key_path, &secret_key.to_bytes())?;
+        println!("\nKey saved to: {}", default_key_path.display());
     }
 
     Ok(())
 }
 
-pub fn validate(path: Option<String>) -> Result<()> {
-    let key_path = path_or_default(path)?;
+/// Validate a key file. If `path` is given it overrides `default_key_path`.
+pub fn validate(default_key_path: &Path, path: Option<String>) -> Result<()> {
+    let key_path = path_or_default(default_key_path, path);
 
     if !key_path.exists() {
-        println!("✗ Key file not found: {}", key_path.display());
+        println!("Key file not found: {}", key_path.display());
         std::process::exit(1);
     }
 
     match load_key_from_file(&key_path) {
         Ok(secret_key) => {
             let endpoint_id = secret_key.public();
-            println!("✓ Valid key");
+            println!("Valid key");
             println!("  Path:    {}", key_path.display());
             println!("  Node ID: {}", hex::encode(endpoint_id.as_bytes()));
         }
         Err(e) => {
-            println!("✗ Invalid key file: {}", e);
+            println!("Invalid key file: {}", e);
             std::process::exit(1);
         }
     }
@@ -158,16 +162,15 @@ pub fn validate(path: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn reset(confirm: bool) -> Result<()> {
-    let key_path = keys::key_path();
-
-    if !key_path.exists() {
-        println!("✓ No key file found (already clean)");
+/// Delete the key at `default_key_path`.
+pub fn reset(default_key_path: &Path, confirm: bool) -> Result<()> {
+    if !default_key_path.exists() {
+        println!("No key file found (already clean)");
         return Ok(());
     }
 
     // Show warning and get current node ID
-    let current_node_id = if let Ok(key) = keys::load_key() {
+    let current_node_id = if let Ok(key) = keys::load_key_at(default_key_path) {
         let endpoint_id = key.public();
         let base32_id = data_encoding::BASE32_NOPAD
             .encode(endpoint_id.as_bytes())
@@ -190,23 +193,23 @@ pub fn reset(confirm: bool) -> Result<()> {
         }
     }
 
-    fs::remove_file(&key_path)?;
-    println!("✓ Key deleted: {}", key_path.display());
+    fs::remove_file(default_key_path)?;
+    println!("Key deleted: {}", default_key_path.display());
 
     Ok(())
 }
 
-// Helper functions
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn path_or_default(path: Option<String>) -> Result<PathBuf> {
-    Ok(if let Some(p) = path {
-        PathBuf::from(p)
-    } else {
-        keys::key_path()
-    })
+/// Return `path` as a `PathBuf` if provided, otherwise `default`.
+fn path_or_default(default: &Path, path: Option<String>) -> PathBuf {
+    match path {
+        Some(p) => PathBuf::from(p),
+        None => default.to_owned(),
+    }
 }
 
-fn load_key_from_file(path: &PathBuf) -> Result<SecretKey> {
+fn load_key_from_file(path: &Path) -> Result<SecretKey> {
     let bytes = fs::read(path).context("Failed to read key file")?;
 
     if bytes.len() != 32 {
@@ -219,7 +222,7 @@ fn load_key_from_file(path: &PathBuf) -> Result<SecretKey> {
     Ok(SecretKey::from_bytes(&byte_array))
 }
 
-fn save_key_bytes(path: &PathBuf, bytes: &[u8]) -> Result<()> {
+fn save_key_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     // Create parent directory if it doesn't exist
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

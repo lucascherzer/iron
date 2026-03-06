@@ -1,74 +1,47 @@
 //! Cryptographic key management for iron
 //!
 //! Handles persistence and loading of the node's private key.
-//! Keys are stored in `~/.config/iron/secret.key` with 0600 permissions.
+//! Callers are responsible for providing the key file path (typically from
+//! [`crate::config::IronConfig`]). Keys are stored with 0600 permissions.
 
 use anyhow::{Context, Result};
 use iroh::SecretKey;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use tracing::{debug, info};
 
-/// Default key storage directory
-const KEY_DIR: &str = ".config/iron";
-
-/// Key file name
-const KEY_FILE: &str = "secret.key";
-
-/// Get the path to the key storage directory
-fn key_dir_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME environment variable not set")?;
-    Ok(PathBuf::from(home).join(KEY_DIR))
-}
-
-/// Get the full path to the secret key file
-pub fn key_path() -> PathBuf {
-    key_file_path().unwrap_or_else(|_| PathBuf::from("~/.config/iron/secret.key"))
-}
-
-/// Get the full path to the secret key file (internal, returns Result)
-fn key_file_path() -> Result<PathBuf> {
-    Ok(key_dir_path()?.join(KEY_FILE))
-}
-
-/// Load or generate a persistent secret key
+/// Load an existing key, or generate and persist a new one at `path`.
 ///
 /// # Behavior
 ///
-/// 1. If key file exists: Load and return existing key
-/// 2. If key file doesn't exist: Generate new key, save it, and return it
+/// 1. If `path` exists: load and return the key.
+/// 2. Otherwise: generate a new key, save it to `path`, and return it.
 ///
 /// # Security
 ///
-/// - Key file is created with 0600 permissions (owner read/write only)
-/// - Directory is created with 0700 permissions (owner access only)
-///
-/// # Returns
-///
-/// Returns the loaded or newly generated SecretKey
-pub fn load_or_generate_key() -> Result<SecretKey> {
-    let key_path = key_file_path()?;
-
-    if key_path.exists() {
-        info!("Loading existing key from {}", key_path.display());
-        load_key_from_path(&key_path)
+/// - Key file is created with 0600 permissions (owner read/write only).
+/// - Parent directory is created with 0700 permissions if absent.
+pub fn load_or_generate_key_at(path: &Path) -> Result<SecretKey> {
+    if path.exists() {
+        info!("Loading existing key from {}", path.display());
+        load_key_from_path(path)
     } else {
         info!("No existing key found, generating new key");
         let key = SecretKey::generate(&mut rand::rng());
-        save_key(&key_path, &key)?;
-        info!("Key saved to {}", key_path.display());
+        save_key(path, &key)?;
+        info!("Key saved to {}", path.display());
         Ok(key)
     }
 }
 
-/// Load a secret key from a file (public version without path)
-pub fn load_key() -> Result<SecretKey> {
-    let key_path = key_file_path()?;
-    load_key_from_path(&key_path)
+/// Load an existing key from `path`. Returns an error if the file is absent
+/// or malformed.
+pub fn load_key_at(path: &Path) -> Result<SecretKey> {
+    load_key_from_path(path)
 }
 
-/// Load a secret key from a file
-fn load_key_from_path(path: &PathBuf) -> Result<SecretKey> {
+/// Load a secret key from a file.
+fn load_key_from_path(path: &Path) -> Result<SecretKey> {
     let bytes = fs::read(path).context("Failed to read key file")?;
 
     if bytes.len() != 32 {
@@ -88,8 +61,8 @@ fn load_key_from_path(path: &PathBuf) -> Result<SecretKey> {
     Ok(key)
 }
 
-/// Save a secret key to a file with secure permissions
-fn save_key(path: &PathBuf, key: &SecretKey) -> Result<()> {
+/// Save a secret key to a file with secure permissions.
+pub fn save_key(path: &Path, key: &SecretKey) -> Result<()> {
     // Create directory if it doesn't exist
     let dir = path
         .parent()
@@ -197,5 +170,19 @@ mod tests {
 
         // Check that only owner has read/write permissions
         assert_eq!(mode & 0o777, 0o600, "Key file should have 0600 permissions");
+    }
+
+    #[test]
+    fn test_load_or_generate_creates_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let key_path = temp_dir.path().join("secret.key");
+
+        assert!(!key_path.exists());
+        let key = load_or_generate_key_at(&key_path).unwrap();
+        assert!(key_path.exists());
+
+        // Loading again should return the same key
+        let key2 = load_or_generate_key_at(&key_path).unwrap();
+        assert_eq!(key.to_bytes(), key2.to_bytes());
     }
 }
