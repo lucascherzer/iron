@@ -52,7 +52,6 @@ pub fn run(
 
         let handle = std::thread::spawn(move || {
             let mut local_attempts = 0u64;
-            let mut rng = rand::rng();
 
             loop {
                 // Check if another thread found a match
@@ -61,7 +60,7 @@ pub fn run(
                 }
 
                 // Generate a key
-                let secret_key = SecretKey::generate(&mut rng);
+                let secret_key = SecretKey::generate();
                 let endpoint_id = secret_key.public();
                 let base32_id = data_encoding::BASE32_NOPAD
                     .encode(endpoint_id.as_bytes())

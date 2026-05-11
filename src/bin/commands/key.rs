@@ -100,7 +100,7 @@ pub fn import(file: String, save: bool) -> Result<()> {
 }
 
 pub fn generate(save: bool, force: bool) -> Result<()> {
-    let secret_key = SecretKey::generate(&mut rand::rng());
+    let secret_key = SecretKey::generate();
     let endpoint_id = secret_key.public();
 
     println!("✓ New key generated");

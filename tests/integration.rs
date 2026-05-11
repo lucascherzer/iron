@@ -417,7 +417,7 @@ fn test_key_persistence_across_restarts() {
     let key_path = temp_dir.path().join("secret.key");
 
     // Simulate first run: generate and save key
-    let key1 = SecretKey::generate(&mut rand::rng());
+    let key1 = SecretKey::generate();
     let endpoint_id1 = key1.public();
 
     std::fs::write(&key_path, key1.to_bytes()).unwrap();
@@ -456,7 +456,7 @@ fn test_key_persistence_produces_consistent_ipv6() {
     let registry2 = Registry::new();
 
     // Use same key
-    let key = SecretKey::generate(&mut rand::rng());
+    let key = SecretKey::generate();
     let endpoint_id = key.public();
 
     // Both registries should produce same IPv6 for same EndpointId
@@ -475,8 +475,8 @@ fn test_different_keys_produce_different_ipv6() {
     let registry = Registry::new();
 
     // Generate two different keys
-    let key1 = SecretKey::generate(&mut rand::rng());
-    let key2 = SecretKey::generate(&mut rand::rng());
+    let key1 = SecretKey::generate();
+    let key2 = SecretKey::generate();
 
     let endpoint_id1 = key1.public();
     let endpoint_id2 = key2.public();
@@ -500,7 +500,7 @@ fn test_key_file_has_secure_permissions() {
     let key_path = temp_dir.path().join("secret.key");
 
     // Generate and save a key
-    let key = SecretKey::generate(&mut rand::rng());
+    let key = SecretKey::generate();
     std::fs::write(&key_path, key.to_bytes()).unwrap();
 
     // Set secure permissions
@@ -552,7 +552,7 @@ async fn test_e2e_key_persistence_to_ipv6_mapping() {
     // === First "run" ===
 
     // Generate and save key
-    let key1 = SecretKey::generate(&mut rand::rng());
+    let key1 = SecretKey::generate();
     std::fs::write(&key_path, key1.to_bytes()).unwrap();
 
     // Create registry and get IPv6

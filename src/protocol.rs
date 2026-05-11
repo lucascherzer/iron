@@ -2,7 +2,7 @@ use crate::mapping::Registry;
 use crate::packet::Packet;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
-use iroh::{Endpoint, EndpointId, Watcher};
+use iroh::{Endpoint, EndpointId};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -129,27 +129,6 @@ impl IronProtocol {
             // Cache it for future use
             self.connection_pool.insert(*dest, new_conn.clone());
 
-            // Log connection type for diagnostics
-            if let Some(mut conn_type_watcher) = self.endpoint.conn_type(*dest) {
-                match conn_type_watcher.get() {
-                    iroh::endpoint::ConnectionType::Direct(addr) => {
-                        debug!("Direct connection established to {} via {}", dest, addr);
-                    }
-                    iroh::endpoint::ConnectionType::Relay(url) => {
-                        debug!("Relayed connection to {} via {}", dest, url);
-                    }
-                    iroh::endpoint::ConnectionType::Mixed(addr, url) => {
-                        debug!(
-                            "Mixed connection to {} (direct: {}, relay: {})",
-                            dest, addr, url
-                        );
-                    }
-                    iroh::endpoint::ConnectionType::None => {
-                        debug!("Connection to {} established but type unknown", dest);
-                    }
-                }
-            }
-
             info!("Successfully connected to {} and cached connection", dest);
             new_conn
         };
@@ -227,30 +206,6 @@ impl IronProtocol {
                 .to_lowercase();
 
             debug!("Accepted connection from {}", base32_id);
-
-            // Log connection type for diagnostics
-            if let Some(mut conn_type_watcher) = endpoint.conn_type(sender_id) {
-                match conn_type_watcher.get() {
-                    iroh::endpoint::ConnectionType::Direct(addr) => {
-                        debug!("Incoming direct connection from {} via {}", sender_id, addr);
-                    }
-                    iroh::endpoint::ConnectionType::Relay(url) => {
-                        debug!("Incoming relayed connection from {} via {}", sender_id, url);
-                    }
-                    iroh::endpoint::ConnectionType::Mixed(addr, url) => {
-                        debug!(
-                            "Incoming mixed connection from {} (direct: {}, relay: {})",
-                            sender_id, addr, url
-                        );
-                    }
-                    iroh::endpoint::ConnectionType::None => {
-                        debug!(
-                            "Incoming connection from {} accepted but type unknown",
-                            sender_id
-                        );
-                    }
-                }
-            }
 
             // Spawn task to handle this connection
             let registry = registry.clone();
@@ -384,6 +339,7 @@ impl IronProtocol {
 mod tests {
     use super::*;
     use iroh::SecretKey;
+    use iroh::endpoint::presets::N0;
     use std::net::Ipv6Addr;
 
     /// Helper to create test EndpointIds
@@ -639,8 +595,8 @@ mod tests {
     #[tokio::test]
     async fn test_protocol_construction() {
         let registry = Arc::new(Registry::new());
-        let secret = SecretKey::generate(&mut rand::rng());
-        let endpoint = Endpoint::builder()
+        let secret = SecretKey::generate();
+        let endpoint = Endpoint::builder(N0)
             .secret_key(secret)
             .alpns(vec![ALPN.to_vec()])
             .bind()

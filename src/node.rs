@@ -5,6 +5,7 @@ use crate::protocol::IronProtocol;
 use crate::tun::TunInterface;
 use anyhow::Result;
 use iroh::Endpoint;
+use iroh::endpoint::presets::N0;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -51,7 +52,7 @@ impl IronNode {
 
         // Initialize iroh endpoint with persistent key
         info!("Creating iroh endpoint");
-        let endpoint = Endpoint::builder()
+        let endpoint = Endpoint::builder(N0)
             .secret_key(secret_key)
             .alpns(vec![crate::protocol::ALPN.to_vec()])
             .bind()

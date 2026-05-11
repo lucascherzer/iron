@@ -54,7 +54,7 @@ pub fn load_or_generate_key() -> Result<SecretKey> {
         load_key_from_path(&key_path)
     } else {
         info!("No existing key found, generating new key");
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         save_key(&key_path, &key)?;
         info!("Key saved to {}", key_path.display());
         Ok(key)
@@ -146,7 +146,7 @@ mod tests {
         let key_path = temp_dir.path().join("test_secret.key");
 
         // Generate and save a key
-        let original_key = SecretKey::generate(&mut rand::rng());
+        let original_key = SecretKey::generate();
         save_key(&key_path, &original_key).unwrap();
 
         // Load the key
@@ -189,7 +189,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("test_secret.key");
 
-        let key = SecretKey::generate(&mut rand::rng());
+        let key = SecretKey::generate();
         save_key(&key_path, &key).unwrap();
 
         let metadata = fs::metadata(&key_path).unwrap();

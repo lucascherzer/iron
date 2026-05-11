@@ -9,7 +9,7 @@ path = "src/bin/iron.rs"
 
 [dependencies]
 # Core networking
-iroh = "0.95"
+iroh = "1.0.0-rc.0"
 tun = { version = "0.8", features = ["async"] }
 
 # Async runtime
