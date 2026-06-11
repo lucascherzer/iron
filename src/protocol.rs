@@ -22,9 +22,9 @@ pub struct IronProtocol {
     registry: Arc<Registry>,
     endpoint: Endpoint,
     /// Receives packets from TUN to send to peers
-    to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Packet)>,
+    to_network_rx: mpsc::Receiver<(EndpointId, Packet)>,
     /// Sends received packets to TUN
-    from_network_tx: mpsc::UnboundedSender<Packet>,
+    from_network_tx: mpsc::Sender<Packet>,
     /// Connection pool: maps EndpointId -> Connection for reuse
     connection_pool: Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
 }
@@ -34,8 +34,8 @@ impl IronProtocol {
     pub fn new(
         registry: Arc<Registry>,
         endpoint: Endpoint,
-        to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Packet)>,
-        from_network_tx: mpsc::UnboundedSender<Packet>,
+        to_network_rx: mpsc::Receiver<(EndpointId, Packet)>,
+        from_network_tx: mpsc::Sender<Packet>,
     ) -> Self {
         info!("Creating protocol handler for endpoint {}", endpoint.id());
         Self {
@@ -181,7 +181,7 @@ impl IronProtocol {
     async fn accept_loop(
         endpoint: Endpoint,
         registry: Arc<Registry>,
-        from_network_tx: mpsc::UnboundedSender<Packet>,
+        from_network_tx: mpsc::Sender<Packet>,
     ) -> Result<()> {
         info!("Starting accept loop on {}", endpoint.id());
 
@@ -230,7 +230,7 @@ impl IronProtocol {
         conn: iroh::endpoint::Connection,
         sender_id: EndpointId,
         registry: Arc<Registry>,
-        from_network_tx: mpsc::UnboundedSender<Packet>,
+        from_network_tx: mpsc::Sender<Packet>,
     ) -> Result<()> {
         debug!(
             "Handling connection from {}, accepting streams...",
@@ -281,7 +281,10 @@ impl IronProtocol {
 
             trace!("Forwarding packet to TUN with rewritten source");
             // Forward packet to TUN (wrap in Packet type)
-            if let Err(e) = from_network_tx.send(Packet::raw(packet_with_correct_source)) {
+            if let Err(e) = from_network_tx
+                .send(Packet::raw(packet_with_correct_source))
+                .await
+            {
                 error!("Failed to send packet to TUN: {}", e);
                 break; // TUN channel closed, exit
             }
@@ -603,8 +606,8 @@ mod tests {
             .await
             .expect("Failed to create endpoint");
 
-        let (_to_network_tx, to_network_rx) = mpsc::unbounded_channel();
-        let (from_network_tx, _from_network_rx) = mpsc::unbounded_channel();
+        let (_to_network_tx, to_network_rx) = mpsc::channel(1024);
+        let (from_network_tx, _from_network_rx) = mpsc::channel(1024);
 
         let protocol = IronProtocol::new(registry, endpoint, to_network_rx, from_network_tx);
 

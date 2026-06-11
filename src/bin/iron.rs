@@ -1,7 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use iroh::EndpointId;
 use iron::IronNode;
 use iron::dns_config;
+use iron::node::DirectPeerConfig;
+use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::{error, info};
 
 mod commands;
@@ -28,6 +31,15 @@ struct Cli {
     /// Remove DNS configuration for .iron domains (manual cleanup)
     #[arg(long)]
     cleanup_dns: bool,
+
+    /// UDP port for the iroh QUIC endpoint (default: OS-assigned)
+    #[arg(long, global = true)]
+    listen_port: Option<u16>,
+
+    /// Pre-register a peer for direct connections (repeatable).
+    /// Format: <base32_endpoint_id>@<ip>:<port>
+    #[arg(long = "add-peer", global = true)]
+    add_peers: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -207,7 +219,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Serve) => {
             // Start daemon
-            start_daemon(cli.log_level, cli.dns_port).await?;
+            start_daemon(cli.log_level, cli.dns_port, cli.listen_port, cli.add_peers).await?;
         }
         Some(Command::Convert { value, to }) => {
             commands::convert::run(value, to)?;
@@ -274,7 +286,12 @@ async fn main() -> Result<()> {
 }
 
 /// Start the iron daemon (default behavior)
-async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
+async fn start_daemon(
+    log_level: String,
+    dns_port: u16,
+    listen_port: Option<u16>,
+    add_peers: Vec<String>,
+) -> Result<()> {
     // Display banner
     print_banner(&log_level, dns_port);
 
@@ -289,9 +306,16 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     // Setup DNS configuration automatically
     setup_dns_for_daemon()?;
 
+    // Parse peer addresses for direct connections
+    let direct_config = parse_direct_config(listen_port, &add_peers)?;
+
     // Initialize and start iron node
     info!("Initializing iron node...");
-    let node = IronNode::new().await?;
+    let node = if direct_config.listen_port.is_some() || !direct_config.peers.is_empty() {
+        IronNode::with_config(direct_config).await?
+    } else {
+        IronNode::new().await?
+    };
 
     // Get a reference to the registry for saving on shutdown
     let registry = node.registry().clone();
@@ -476,6 +500,33 @@ fn check_root() {
 fn check_root() {
     // Windows/other platforms: just continue
     // TUN device creation will fail with appropriate error message if privileges are insufficient
+}
+
+/// Parse direct peer configuration from CLI arguments.
+fn parse_direct_config(listen_port: Option<u16>, add_peers: &[String]) -> Result<DirectPeerConfig> {
+    let mut peers = Vec::new();
+    for arg in add_peers {
+        // Format: <base32_endpoint_id>@<ip>:<port>
+        let (base32_id, addr_str) = arg
+            .split_once('@')
+            .context("Peer format must be <base32_id>@<ip>:<port>")?;
+        let bytes: Vec<u8> =
+            data_encoding::BASE32_NOPAD.decode(base32_id.to_uppercase().as_bytes())?;
+        anyhow::ensure!(
+            bytes.len() == 32,
+            "Base32 decoded to {} bytes, expected 32",
+            bytes.len()
+        );
+        let mut endpoint_bytes = [0u8; 32];
+        endpoint_bytes.copy_from_slice(&bytes);
+        let endpoint_id = EndpointId::from_bytes(&endpoint_bytes)?;
+        let addr: SocketAddr = addr_str
+            .to_socket_addrs()?
+            .next()
+            .context("Invalid socket address")?;
+        peers.push((endpoint_id, addr));
+    }
+    Ok(DirectPeerConfig { listen_port, peers })
 }
 
 /// Fix key directory ownership if it's owned by root

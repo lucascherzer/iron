@@ -85,6 +85,27 @@
             inherit (commonArgs) src;
             inherit advisory-db;
           };
+
+          # VM-based integration tests (Linux only)
+          iron-vm-two-node-test = if pkgs.stdenv.isLinux then
+            import ./tests/vm/two-node-test.nix {
+              inherit pkgs;
+              ironPackage = iron;
+            }
+          else
+            pkgs.runCommand "iron-vm-two-node-test-skipped" {} ''
+              echo "VM two-node test skipped (Linux only)" > $out
+            '';
+
+          iron-vm-reconnect-test = if pkgs.stdenv.isLinux then
+            import ./tests/vm/reconnect-test.nix {
+              inherit pkgs;
+              ironPackage = iron;
+            }
+          else
+            pkgs.runCommand "iron-vm-reconnect-test-skipped" {} ''
+              echo "VM reconnect test skipped (Linux only)" > $out
+            '';
         };
 
         # `nix develop`

@@ -14,7 +14,37 @@
 - 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
 
-## Recent Updates (Jan 21, 2026)
+## Recent Updates (Jun 11, 2026)
+
+### ✅ VM Integration Tests + Direct Peer Addressing - COMPLETE!
+- **Problem**: VM integration tests on the `tests/integration-microvm` branch couldn't establish P2P connections because iroh nodes in a sandboxed VM have no internet access to relay servers, and DNS-based address lookup requires the relay to work.
+- **Fix**: Added `MemoryLookup` (in-memory address lookup) + `RelayMode::Disabled` + `--listen-port` for direct peer connections without relays.
+- **New CLI flags**:
+  - `--listen-port <PORT>`: Fixes the QUIC listener port (required for direct addressing)
+  - `--add-peer <base32_id>@<ip>:<port>`: Repeatable, injects direct peer addresses into `MemoryLookup`
+- **New API**: `IronNode::with_config(DirectPeerConfig)` — configurable endpoint with relay disabled and direct peer addressing.
+- **VM tests created**:
+  - `tests/vm/two-node-test.nix`: Two-node connectivity test using direct addressing. Nodes start sequentially, exchange peer info, and verify bidirectional HTTP over the iron network.
+  - `tests/vm/reconnect-test.nix`: Disconnection/reconnection test. Kills iron on one node mid-transfer, restarts with same key, verifies data integrity. Demonstrates that the bounded channel prevents stale packet accumulation.
+- **Files Modified**:
+  - `src/node.rs`: Added `DirectPeerConfig`, `MemoryLookup`, `RelayMode::Disabled`, `bind_addr` support
+  - `src/bin/iron.rs`: Added `--listen-port` and `--add-peer` CLI flags, `parse_direct_config()` helper
+  - `flake.nix`: Added `iron-vm-two-node-test` and `iron-vm-reconnect-test` check derivations
+  - `.gitignore`: Added `**/__pycache__/`
+- **Status**: ✅ COMPLETE - All 75 tests passing, `nix flake check` passing
+
+### ✅ Bounded Channel Backpressure - COMPLETE!
+- **Problem**: Unbounded `mpsc::unbounded_channel()` allowed stale TCP retransmission packets to accumulate during QUIC disconnections. After reconnection, all buffered packets were flushed, causing the remote peer to accept stale data (correct TCP seqnums) and produce garbled terminal output.
+- **Fix**: Replaced unbounded channels with bounded `mpsc::channel(1024)` in `src/node.rs:69-71`, with a `const CHANNEL_BUFFER_SIZE: usize = 1024`.
+- **How it works**: When the channel fills up (QUIC connection down), the TUN read loop blocks, preventing the OS from thinking packets are being delivered. This creates backpressure that lets the OS TCP stack properly detect the dead connection and stop retransmitting.
+- **Files Modified**:
+  - `src/node.rs`: Added `CHANNEL_BUFFER_SIZE` const, switched to `mpsc::channel()`
+  - `src/tun.rs`: Channel types `UnboundedSender/Receiver` → `Sender/Receiver`, `send()` → `send().await`
+  - `src/protocol.rs`: Same type changes, `send()` → `send().await`
+  - `tests/integration.rs`: Updated channel creation calls
+- **Status**: ✅ COMPLETE - All 75 tests passing, `nix flake check` passing
+
+## Previous Updates (Jan 21, 2026)
 
 ### ✅ Packet Abstraction Refactor (Phase 1) - COMPLETE!
 - **Added type-safe Packet enum** to `src/packet.rs` with comprehensive test coverage
