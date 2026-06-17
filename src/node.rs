@@ -6,8 +6,7 @@ use crate::tun::TunInterface;
 use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::endpoint::presets::N0;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr};
-use std::net::SocketAddr;
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode, RelayUrl, TransportAddr};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -28,86 +27,108 @@ pub struct IronNode {
     protocol: IronProtocol,
 }
 
-/// Configuration for direct peer connections.
+/// Configuration for `IronNode` that allows overriding defaults for testing.
 ///
-/// In production, iroh discovers peers via relay servers and DNS-based address
-/// lookup. For tests and isolated networks, this struct allows pre-populating
-/// peer addressing information so connections work without internet access.
+/// When `default()` is used, the standard N0 preset is applied.
+/// The config can be populated from environment variables for VM/integration tests.
 #[derive(Default)]
-pub struct DirectPeerConfig {
-    /// UDP port for the iroh QUIC endpoint to listen on
-    pub listen_port: Option<u16>,
+pub struct IronNodeConfig {
+    /// Override the relay URL (disables N0 preset relay, uses custom relay map)
+    pub relay_url: Option<String>,
     /// Pre-registered peer addresses for direct connections
-    pub peers: Vec<(EndpointId, SocketAddr)>,
+    pub peers: Vec<(EndpointId, String)>,
+}
+
+impl IronNodeConfig {
+    /// Load configuration from environment variables.
+    ///
+    /// - `IROH_RELAY_URL`: Custom relay server URL
+    /// - `IROH_PEER_*`: Repeating variable, format `base32_id@ip:port` or `base32_id@relay_url`
+    pub fn from_env() -> Self {
+        let relay_url = std::env::var("IROH_RELAY_URL").ok();
+        let mut peers = Vec::new();
+        for (key, value) in std::env::vars() {
+            if key.starts_with("IROH_PEER_")
+                && let Some((base32, addr)) = value.split_once('@')
+            {
+                let bytes = data_encoding::BASE32_NOPAD
+                    .decode(base32.to_uppercase().as_bytes())
+                    .ok();
+                if let Some(bytes) = bytes
+                    && bytes.len() == 32
+                {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    if let Ok(id) = EndpointId::from_bytes(&arr) {
+                        peers.push((id, addr.to_string()));
+                    }
+                }
+            }
+        }
+        Self { relay_url, peers }
+    }
 }
 
 impl IronNode {
-    /// Creates a new IronNode with all components initialized
+    /// Creates a new IronNode with all components initialized.
+    ///
+    /// Configures the iroh endpoint using the N0 preset (public relays + Pkarr DNS discovery).
+    /// Custom infrastructure can be configured via `IronNodeConfig` or environment variables.
     pub async fn new() -> Result<Self> {
-        Self::with_config(Default::default()).await
+        Self::with_config(&IronNodeConfig::default()).await
     }
 
-    /// Creates a new IronNode with optional direct peer configuration.
+    /// Creates a new IronNode with the given configuration.
     ///
-    /// When `config` provides peer addresses, the iroh endpoint is configured with
-    /// relay disabled and a [`MemoryLookup`] populated with the given addresses.
-    /// This allows nodes to discover each other on isolated networks without
-    /// internet access to relay servers.
-    pub async fn with_config(config: DirectPeerConfig) -> Result<Self> {
+    /// When `config` specifies a custom relay URL or peers, the endpoint is configured
+    /// with `RelayMode::Custom` and a `MemoryLookup` populated with peer addresses.
+    pub async fn with_config(config: &IronNodeConfig) -> Result<Self> {
         info!("Initializing IronNode");
 
-        // Create shared registry
         let registry = Arc::new(Registry::new());
 
-        // Load previously known peers to prevent issues with cached IPv6 addresses
         match registry.load_peers() {
             Ok(count) if count > 0 => info!("Loaded {} known peers from cache", count),
             Ok(_) => info!("No cached peers found, starting fresh"),
             Err(e) => warn!("Failed to load peers cache: {}", e),
         }
 
-        // Load or generate persistent secret key
-        info!("Loading node identity");
         let secret_key = keys::load_or_generate_key()?;
 
-        let use_direct = config.listen_port.is_some() || !config.peers.is_empty();
-
-        let address_lookup = if use_direct {
-            let lookup = MemoryLookup::new();
-            for (endpoint_id, addr) in &config.peers {
-                let ep_addr = EndpointAddr::from_parts(*endpoint_id, [TransportAddr::Ip(*addr)]);
-                lookup.add_endpoint_info(ep_addr);
-                info!(
-                    "Registered direct address {} for peer {}",
-                    addr,
-                    hex::encode(endpoint_id.as_bytes())
-                );
-            }
-            Some(lookup)
-        } else {
-            None
-        };
-
-        // Initialize iroh endpoint with persistent key
+        // Build endpoint
         info!("Creating iroh endpoint");
         let mut builder = Endpoint::builder(N0)
             .secret_key(secret_key)
             .alpns(vec![crate::protocol::ALPN.to_vec()]);
 
-        if let Some(port) = config.listen_port {
-            let addr = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
-            builder = builder
-                .bind_addr(addr)
-                .context("Failed to set listen address")?;
-            info!("Binding iroh endpoint to port {}", port);
+        // Apply custom relay configuration
+        if let Some(ref relay_url_str) = config.relay_url {
+            let relay_url: RelayUrl = relay_url_str.parse().context("Invalid IROH_RELAY_URL")?;
+            let relay_map = RelayMap::from_iter([relay_url]);
+            builder = builder.relay_mode(RelayMode::Custom(relay_map));
+            info!("Using custom relay: {}", relay_url_str);
         }
 
-        if use_direct {
-            builder = builder.relay_mode(RelayMode::Disabled);
-            info!("Relay servers disabled (direct peer addressing configured)");
-        }
-
-        if let Some(lookup) = address_lookup {
+        // Apply custom peer addresses
+        if !config.peers.is_empty() {
+            let lookup = MemoryLookup::new();
+            for (endpoint_id, addr_str) in &config.peers {
+                let transport = if addr_str.contains("://") {
+                    let relay_url: RelayUrl = addr_str.parse().context("Invalid peer relay URL")?;
+                    TransportAddr::Relay(relay_url)
+                } else {
+                    let socket_addr: std::net::SocketAddr =
+                        addr_str.parse().context("Invalid peer socket address")?;
+                    TransportAddr::Ip(socket_addr)
+                };
+                let ep_addr = EndpointAddr::from_parts(*endpoint_id, [transport]);
+                lookup.add_endpoint_info(ep_addr);
+                info!(
+                    "Registered peer {} via {}",
+                    hex::encode(endpoint_id.as_bytes()),
+                    addr_str
+                );
+            }
             builder = builder.address_lookup(lookup);
         }
 
@@ -120,7 +141,9 @@ impl IronNode {
         info!("Node IPv6 address: {}", node_ipv6);
 
         // Create channels for packet flow
+        // OS → Network: TUN sends packets to protocol handler
         let (to_network_tx, to_network_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
+        // Network → OS: Protocol handler sends packets to TUN
         let (from_network_tx, from_network_rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
 
         // Initialize DNS resolver

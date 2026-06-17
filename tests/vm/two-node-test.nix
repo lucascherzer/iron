@@ -1,9 +1,14 @@
-{ pkgs, ironPackage }:
+{ pkgs, ironPackage, relayPackage }:
 
 pkgs.testers.runNixOSTest {
   name = "iron-two-node-connectivity";
 
   nodes = {
+    relay = { config, pkgs, ... }: {
+      networking.firewall.enable = false;
+      environment.systemPackages = [ relayPackage ];
+    };
+
     nodeA = { config, pkgs, ... }: {
       networking.firewall.enable = false;
       services.resolved.enable = true;
@@ -22,46 +27,53 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    import json, re, time
+    import json
 
     start_all()
+    relay.wait_for_unit("network.target")
     nodeA.wait_for_unit("network.target")
     nodeB.wait_for_unit("network.target")
+
+    relay_ip = relay.succeed("hostname -I | awk '{print $1}'").strip()
+    relay_url = f"http://{relay_ip}:3340"
+    print(f"Relay URL: {relay_url}")
+
+    # Write relay config and start server
+    relay.succeed('echo \'http_bind_addr = "0.0.0.0:3340"\' > /tmp/relay-config.toml')
+    relay.succeed(f"iroh-relay --dev --config-path /tmp/relay-config.toml >& /tmp/relay.log &")
+    relay.sleep(2)
+    relay.succeed(f"curl -s http://{relay_ip}:3340/health 2>&1")
 
     # Generate keys on both nodes
     nodeA.succeed("iron key generate --save --force")
     nodeB.succeed("iron key generate --save --force")
 
-    # Start node B first with a fixed listen port
-    nodeB.succeed("iron serve --listen-port 11222 --log-level debug >& /tmp/iron-b.log &")
+    # Start node B with custom relay and register its info
+    nodeB.succeed(f"IROH_RELAY_URL={relay_url} iron serve --log-level debug >& /tmp/iron-b.log &")
     nodeB.sleep(3)
-
-    # Get node B's identity
     b_info = json.loads(nodeB.succeed("iron self --format json"))
     b_base32 = b_info["node_id"]["base32"]
     b_ipv6 = b_info["network"]["ipv6"]
     print(f"Node B: id={b_base32} ipv6={b_ipv6}")
 
-    # Start node A with B as a known peer
+    # Start node A with relay and B's peer address (via relay)
     nodeA.succeed(
-        f"iron serve --listen-port 11223 "
-        f"--add-peer {b_base32}@192.168.1.3:11222 "
-        f"--log-level debug >& /tmp/iron-a.log &"
+        f"IROH_RELAY_URL={relay_url} "
+        f"IROH_PEER_B={b_base32}@{relay_url} "
+        f"iron serve --log-level debug >& /tmp/iron-a.log &"
     )
     nodeA.sleep(3)
-
-    # Get node A's identity
     a_info = json.loads(nodeA.succeed("iron self --format json"))
     a_base32 = a_info["node_id"]["base32"]
     a_ipv6 = a_info["network"]["ipv6"]
     print(f"Node A: id={a_base32} ipv6={a_ipv6}")
 
-    # Restart node B with A as known peer (so both know each other)
+    # Restart node B with A as peer so both know each other
     nodeB.succeed("pkill -f 'iron serve' 2>/dev/null; sleep 2")
     nodeB.succeed(
-        f"iron serve --listen-port 11222 "
-        f"--add-peer {a_base32}@192.168.1.2:11223 "
-        f"--log-level debug >& /tmp/iron-b.log &"
+        f"IROH_RELAY_URL={relay_url} "
+        f"IROH_PEER_A={a_base32}@{relay_url} "
+        f"iron serve --log-level debug >& /tmp/iron-b.log &"
     )
     nodeB.sleep(3)
 

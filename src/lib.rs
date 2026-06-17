@@ -7,5 +7,5 @@ pub mod packet;
 pub mod protocol;
 pub mod tun;
 
-pub use node::IronNode;
+pub use node::{IronNode, IronNodeConfig};
 pub use packet::Packet;

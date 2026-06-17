@@ -9,9 +9,13 @@
       url = "github:rustsec/advisory-db";
       flake = false;
     };
+    iroh-repo = {
+      url = "github:n0-computer/iroh";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, crane, flake-utils, advisory-db, ... }:
+  outputs = { self, nixpkgs, crane, flake-utils, advisory-db, iroh-repo, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -46,12 +50,35 @@
             mainProgram = "iron";
           };
         });
+
+        # Build the iroh relay server binary for VM integration tests.
+        # Uses the iroh source from the flake input to build just the
+        # iroh-relay crate with the server feature enabled.
+        irohRelayDeps = craneLib.buildDepsOnly {
+          src = iroh-repo;
+          pname = "iroh-relay";
+          cargoExtraArgs = "--package iroh-relay --features server";
+          strictDeps = true;
+          nativeBuildInputs = with pkgs; [ clang ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+        };
+        irohRelay = craneLib.buildPackage {
+          src = iroh-repo;
+          pname = "iroh-relay";
+          cargoExtraArgs = "--package iroh-relay --features server";
+          cargoArtifacts = irohRelayDeps;
+          doCheck = false;
+          strictDeps = true;
+          nativeBuildInputs = with pkgs; [ clang ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+        };
       in
       {
         # `nix build`
         packages = {
           default = iron;
           inherit iron;
+          iroh-relay = irohRelay;
         };
 
         # `nix run`
@@ -91,6 +118,7 @@
             import ./tests/vm/two-node-test.nix {
               inherit pkgs;
               ironPackage = iron;
+              relayPackage = irohRelay;
             }
           else
             pkgs.runCommand "iron-vm-two-node-test-skipped" {} ''
@@ -101,6 +129,7 @@
             import ./tests/vm/reconnect-test.nix {
               inherit pkgs;
               ironPackage = iron;
+              relayPackage = irohRelay;
             }
           else
             pkgs.runCommand "iron-vm-reconnect-test-skipped" {} ''

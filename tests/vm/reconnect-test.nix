@@ -1,9 +1,14 @@
-{ pkgs, ironPackage }:
+{ pkgs, ironPackage, relayPackage }:
 
 pkgs.testers.runNixOSTest {
   name = "iron-reconnect-stale-packet";
 
   nodes = {
+    relay = { config, pkgs, ... }: {
+      networking.firewall.enable = false;
+      environment.systemPackages = [ relayPackage ];
+    };
+
     nodeA = { config, pkgs, ... }: {
       networking.firewall.enable = false;
       services.resolved.enable = true;
@@ -22,29 +27,42 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    import json, hashlib, time
+    import json
 
     start_all()
+    relay.wait_for_unit("network.target")
     nodeA.wait_for_unit("network.target")
     nodeB.wait_for_unit("network.target")
+
+    relay_ip = relay.succeed("hostname -I | awk '{print $1}'").strip()
+    relay_url = f"http://{relay_ip}:3340"
+    print(f"Relay URL: {relay_url}")
+
+    # Start relay server
+    relay.succeed('echo \'http_bind_addr = "0.0.0.0:3340"\' > /tmp/relay-config.toml')
+    relay.succeed(f"iroh-relay --dev --config-path /tmp/relay-config.toml >& /tmp/relay.log &")
+    relay.sleep(2)
+    relay.succeed(f"curl -s http://{relay_ip}:3340/health 2>&1")
 
     # Generate keys
     nodeA.succeed("iron key generate --save --force")
     nodeB.succeed("iron key generate --save --force")
 
     # Start B first
-    nodeB.succeed("iron serve --listen-port 11222 --log-level debug >& /tmp/iron-b.log &")
+    nodeB.succeed(
+        f"IROH_RELAY_URL={relay_url} iron serve --log-level debug >& /tmp/iron-b.log &"
+    )
     nodeB.sleep(3)
     b_info = json.loads(nodeB.succeed("iron self --format json"))
     b_base32 = b_info["node_id"]["base32"]
     b_ipv6 = b_info["network"]["ipv6"]
     print(f"Node B: id={b_base32} ipv6={b_ipv6}")
 
-    # Start A with B as peer
+    # Start A with relay and B as peer
     nodeA.succeed(
-        f"iron serve --listen-port 11223 "
-        f"--add-peer {b_base32}@192.168.1.3:11222 "
-        f"--log-level debug >& /tmp/iron-a.log &"
+        f"IROH_RELAY_URL={relay_url} "
+        f"IROH_PEER_B={b_base32}@{relay_url} "
+        f"iron serve --log-level debug >& /tmp/iron-a.log &"
     )
     nodeA.sleep(3)
     a_info = json.loads(nodeA.succeed("iron self --format json"))
@@ -55,9 +73,9 @@ pkgs.testers.runNixOSTest {
     # Restart B with A as peer (bidirectional)
     nodeB.succeed("pkill -f 'iron serve' 2>/dev/null; sleep 2")
     nodeB.succeed(
-        f"iron serve --listen-port 11222 "
-        f"--add-peer {a_base32}@192.168.1.2:11223 "
-        f"--log-level debug >& /tmp/iron-b.log &"
+        f"IROH_RELAY_URL={relay_url} "
+        f"IROH_PEER_A={a_base32}@{relay_url} "
+        f"iron serve --log-level debug >& /tmp/iron-b.log &"
     )
     nodeB.sleep(3)
 
@@ -124,9 +142,9 @@ pkgs.testers.runNixOSTest {
     # Restart iron on node A with same key
     print("=== Reconnecting ===")
     nodeA.succeed(
-        f"iron serve --listen-port 11223 "
-        f"--add-peer {b_base32}@192.168.1.3:11222 "
-        f"--log-level debug >& /tmp/iron-a-reconnect.log &"
+        f"IROH_RELAY_URL={relay_url} "
+        f"IROH_PEER_B={b_base32}@{relay_url} "
+        f"iron serve --log-level debug >& /tmp/iron-a-reconnect.log &"
     )
     nodeA.sleep(3)
 
@@ -151,13 +169,8 @@ pkgs.testers.runNixOSTest {
         print("=== Reconnect test PASSED - data integrity verified ===")
     elif "no output" in recv_output or recv_output.strip() == "":
         print("=== Reconnect test PARTIAL - transfer incomplete (expected with bounded channel) ===")
-        # The bounded channel may cause the transfer to stall during disconnection
-        # and not resume properly if the connection pool was lost
-        # This is still useful to validate the mechanism works
         print("This is expected: the bounded channel prevents stale packet accumulation")
     else:
-        # Hash mismatch would indicate stale packet contamination
         print(f"WARNING: Hash mismatch! Expected: {expected_hash}, Got: {recv_output}")
-    ''
-  ;
+  '';
 }
