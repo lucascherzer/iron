@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use iroh::{Endpoint, EndpointId};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tracing::{debug, error, info, trace, warn};
 
 /// ALPN protocol identifier for iron packet transport
@@ -12,6 +14,15 @@ pub const ALPN: &[u8] = b"iron/packet/0";
 
 /// Maximum packet size (MTU)
 const MAX_PACKET_SIZE: usize = 1500;
+
+/// TTL for cached connections: evict after 60s of inactivity
+const CONNECTION_TTL: Duration = Duration::from_secs(60);
+
+/// A connection with TTL tracking for proactive stale-connection eviction
+struct CachedConnection {
+    conn: iroh::endpoint::Connection,
+    last_used: Instant,
+}
 
 /// Iroh protocol handler for packet transport
 ///
@@ -25,8 +36,8 @@ pub struct IronProtocol {
     to_network_rx: mpsc::UnboundedReceiver<(EndpointId, Packet)>,
     /// Sends received packets to TUN
     from_network_tx: mpsc::UnboundedSender<Packet>,
-    /// Connection pool: maps EndpointId -> Connection for reuse
-    connection_pool: Arc<DashMap<EndpointId, iroh::endpoint::Connection>>,
+    /// Connection pool: maps EndpointId -> CachedConnection for reuse with TTL eviction
+    connection_pool: Arc<DashMap<EndpointId, CachedConnection>>,
 }
 
 impl IronProtocol {
@@ -105,49 +116,73 @@ impl IronProtocol {
         Ok(())
     }
 
+    /// Get or create a connection to a peer, with TTL-based eviction.
+    ///
+    /// If a cached connection exists and hasn't exceeded `CONNECTION_TTL` since
+    /// last use, it is returned. Otherwise the stale entry is evicted and a new
+    /// connection is established and cached.
+    async fn get_or_create_connection(
+        &self,
+        dest: &EndpointId,
+    ) -> Result<iroh::endpoint::Connection> {
+        if let Some(entry) = self.connection_pool.get(dest) {
+            if entry.last_used.elapsed() < CONNECTION_TTL {
+                trace!("Reusing cached connection to {}", dest);
+                return Ok(entry.conn.clone());
+            }
+            drop(entry);
+            trace!("Cached connection to {} expired, reconnecting", dest);
+            self.connection_pool.remove(dest);
+        }
+
+        info!("Connecting to peer {} (no cached connection)", dest);
+        let new_conn = self
+            .endpoint
+            .connect(*dest, ALPN)
+            .await
+            .context("Failed to connect to peer")?;
+
+        self.connection_pool.insert(
+            *dest,
+            CachedConnection {
+                conn: new_conn.clone(),
+                last_used: Instant::now(),
+            },
+        );
+
+        info!("Successfully connected to {} and cached connection", dest);
+        Ok(new_conn)
+    }
+
+    /// Refresh the `last_used` timestamp for a cached connection (refresh on use).
+    fn refresh_connection(&self, dest: &EndpointId) {
+        if let Some(mut entry) = self.connection_pool.get_mut(dest) {
+            entry.last_used = Instant::now();
+        }
+    }
+
     /// Sends a single packet to a peer
     ///
-    /// Uses connection pooling to reuse existing connections when possible,
-    /// avoiding repeated handshakes.
+    /// Uses connection pooling with TTL-based eviction to reuse existing
+    /// connections when possible, avoiding repeated handshakes.
     async fn send_packet(&self, dest: &EndpointId, packet: &Packet) -> Result<()> {
-        // Try to get existing connection from pool
-        let conn = if let Some(cached_conn) = self.connection_pool.get(dest) {
-            trace!("Reusing cached connection to {}", dest);
-            cached_conn.value().clone()
-        } else {
-            info!(
-                "Attempting to connect to peer {} (no cached connection)",
-                dest
-            );
-            // Create new connection
-            let new_conn = self
-                .endpoint
-                .connect(*dest, ALPN)
-                .await
-                .context("Failed to connect to peer")?;
-
-            // Cache it for future use
-            self.connection_pool.insert(*dest, new_conn.clone());
-
-            info!("Successfully connected to {} and cached connection", dest);
-            new_conn
-        };
+        let conn = self.get_or_create_connection(dest).await?;
 
         trace!("Opening bi-directional stream to {}", dest);
-        // Open bi-directional stream
         let stream_result = conn.open_bi().await;
 
         let (mut send, _recv) = match stream_result {
-            Ok(s) => s,
+            Ok(s) => {
+                self.refresh_connection(dest);
+                s
+            }
             Err(e) => {
-                // Connection might be stale, remove from pool and retry once
                 warn!(
                     "Failed to open stream on cached connection to {}: {}",
                     dest, e
                 );
                 self.connection_pool.remove(dest);
 
-                // Retry with new connection
                 trace!("Retrying with new connection to {}", dest);
                 let new_conn = self
                     .endpoint
@@ -155,7 +190,13 @@ impl IronProtocol {
                     .await
                     .context("Failed to connect to peer on retry")?;
 
-                self.connection_pool.insert(*dest, new_conn.clone());
+                self.connection_pool.insert(
+                    *dest,
+                    CachedConnection {
+                        conn: new_conn.clone(),
+                        last_used: Instant::now(),
+                    },
+                );
 
                 new_conn
                     .open_bi()
@@ -614,6 +655,67 @@ mod tests {
             0,
             "Connection pool should start empty"
         );
+    }
+
+    #[tokio::test]
+    async fn test_connection_ttl_expires_cached_connections() {
+        let secret1 = SecretKey::generate();
+        let secret2 = SecretKey::generate();
+        let id2 = secret2.public();
+
+        let ep1 = Endpoint::builder(N0)
+            .secret_key(secret1)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+
+        let ep2 = Endpoint::builder(N0)
+            .secret_key(secret2)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+
+        // Accept incoming connections on ep2 so ep1's connect succeeds
+        let accept_task = tokio::spawn(async move {
+            loop {
+                if let Some(incoming) = ep2.accept().await
+                    && let Ok(_conn) = incoming.await
+                {}
+            }
+        });
+
+        let registry = Arc::new(Registry::new());
+        let (_to_network_tx, to_network_rx) = mpsc::unbounded_channel();
+        let (from_network_tx, _from_network_rx) = mpsc::unbounded_channel();
+
+        let protocol = IronProtocol::new(registry, ep1, to_network_rx, from_network_tx);
+
+        assert_eq!(protocol.connection_pool.len(), 0);
+
+        // First call establishes and caches a connection
+        let _conn1 = protocol.get_or_create_connection(&id2).await.unwrap();
+        assert_eq!(protocol.connection_pool.len(), 1);
+
+        // Manually age the entry past TTL
+        if let Some(mut entry) = protocol.connection_pool.get_mut(&id2) {
+            entry.last_used = Instant::now() - CONNECTION_TTL - Duration::from_secs(1);
+        }
+
+        // get_or_create_connection should evict the expired entry and create a new connection
+        let _conn2 = protocol.get_or_create_connection(&id2).await.unwrap();
+        assert_eq!(protocol.connection_pool.len(), 1);
+
+        // Verify the last_used timestamp was refreshed
+        if let Some(entry) = protocol.connection_pool.get(&id2) {
+            assert!(
+                entry.last_used.elapsed() < Duration::from_secs(1),
+                "Cached timestamp should be recent after reconnection"
+            );
+        }
+
+        accept_task.abort();
     }
 
     #[test]
