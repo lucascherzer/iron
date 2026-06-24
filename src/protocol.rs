@@ -383,11 +383,7 @@ mod tests {
     use iroh::endpoint::presets::N0;
     use std::net::Ipv6Addr;
 
-    /// Helper to create test EndpointIds
-    fn test_endpoint_id(seed: u8) -> EndpointId {
-        let secret = SecretKey::from_bytes(&[seed; 32]);
-        secret.public()
-    }
+    use crate::test_utils::test_endpoint_id;
 
     /// Helper to create a minimal valid IPv6 packet
     fn create_ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr, payload_size: usize) -> Vec<u8> {

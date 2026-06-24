@@ -274,13 +274,7 @@ impl Default for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::SecretKey;
-
-    /// Helper to create a test EndpointId from a seed value
-    fn test_endpoint_id(seed: u8) -> EndpointId {
-        let secret = SecretKey::from_bytes(&[seed; 32]);
-        secret.public()
-    }
+    use crate::test_utils::test_endpoint_id;
 
     #[test]
     fn test_registry_new() {

@@ -484,12 +484,7 @@ impl TunInterface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::SecretKey;
-
-    fn test_endpoint_id(seed: u8) -> iroh::EndpointId {
-        let secret = SecretKey::from_bytes(&[seed; 32]);
-        secret.public()
-    }
+    use crate::test_utils::test_endpoint_id;
 
     #[test]
     fn test_tun_interface_new() {

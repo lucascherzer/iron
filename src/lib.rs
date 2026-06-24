@@ -4,6 +4,7 @@ pub mod keys;
 pub mod mapping;
 pub mod node;
 pub mod packet;
+pub mod test_utils;
 pub mod protocol;
 pub mod tun;
 

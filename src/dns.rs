@@ -246,13 +246,8 @@ impl RequestHandler for IronDnsHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::SecretKey;
+    use crate::test_utils::test_endpoint_id;
     use std::str::FromStr;
-
-    fn test_endpoint_id(seed: u8) -> EndpointId {
-        let secret = SecretKey::from_bytes(&[seed; 32]);
-        secret.public()
-    }
 
     #[test]
     fn test_dns_resolver_new() {

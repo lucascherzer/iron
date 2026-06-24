@@ -16,11 +16,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-/// Helper to create test EndpointIds
-fn test_endpoint_id(seed: u8) -> EndpointId {
-    let secret = SecretKey::from_bytes(&[seed; 32]);
-    secret.public()
-}
+use iron::test_utils::test_endpoint_id;
 
 /// Test that Registry provides consistent mappings across all components
 #[tokio::test]
