@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub fn run(
@@ -15,131 +16,64 @@ pub fn run(
     output: Option<String>,
     quiet: bool,
 ) -> Result<()> {
-    // Validate prefix
     validate_prefix(&prefix)?;
 
     let prefix_lower = prefix.to_lowercase();
-    let num_threads = threads.unwrap_or_else(|| {
+    let num_threads = resolve_thread_count(threads);
+
+    if !quiet {
+        print_search_banner(&prefix, num_threads, &prefix_lower);
+    }
+
+    let start_time = Instant::now();
+    let result = run_search(&prefix_lower, num_threads, max_attempts, quiet)?;
+    let elapsed = start_time.elapsed();
+
+    display_result(&result, elapsed, quiet)?;
+    handle_save(&result, save, output, quiet, &prefix)
+}
+
+fn resolve_thread_count(threads: Option<usize>) -> usize {
+    threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
-    });
+    })
+}
 
-    if !quiet {
-        println!(
-            "\nSearching for vanity address with prefix \"{}\"...",
-            prefix
-        );
-        println!("Threads: {}", num_threads);
-        print_difficulty_estimate(&prefix_lower);
-        println!();
-    }
-
-    // Shared state
+fn run_search(
+    prefix: &str,
+    num_threads: usize,
+    max_attempts: Option<u64>,
+    quiet: bool,
+) -> Result<VanityResult> {
     let found = Arc::new(AtomicBool::new(false));
     let total_attempts = Arc::new(AtomicU64::new(0));
-    let start_time = Instant::now();
+    let (tx, rx) = mpsc::channel();
 
-    // Spawn worker threads
-    let mut handles = vec![];
-    let (tx, rx) = std::sync::mpsc::channel();
+    let handles: Vec<_> = (0..num_threads)
+        .map(|_| {
+            let prefix = prefix.to_string();
+            let found = Arc::clone(&found);
+            let total_attempts = Arc::clone(&total_attempts);
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                worker_loop(&prefix, max_attempts, &found, &total_attempts, tx)
+            })
+        })
+        .collect();
 
-    for _thread_id in 0..num_threads {
-        let prefix = prefix_lower.clone();
-        let found = Arc::clone(&found);
+    let progress_handle = (!quiet).then(|| {
         let total_attempts = Arc::clone(&total_attempts);
-        let tx = tx.clone();
+        let found = Arc::clone(&found);
+        std::thread::spawn(move || progress_loop(&found, &total_attempts))
+    });
 
-        let handle = std::thread::spawn(move || {
-            let mut local_attempts = 0u64;
-
-            loop {
-                // Check if another thread found a match
-                if found.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                // Generate a key
-                let secret_key = SecretKey::generate();
-                let endpoint_id = secret_key.public();
-                let base32_id = data_encoding::BASE32_NOPAD
-                    .encode(endpoint_id.as_bytes())
-                    .to_lowercase();
-
-                local_attempts += 1;
-
-                // Check if it matches
-                if base32_id.starts_with(&prefix) {
-                    found.store(true, Ordering::Relaxed);
-                    total_attempts.fetch_add(local_attempts, Ordering::Relaxed);
-                    let _ = tx.send(VanityResult {
-                        secret_key,
-                        endpoint_id,
-                        base32_id,
-                        attempts: total_attempts.load(Ordering::Relaxed),
-                    });
-                    break;
-                }
-
-                // Update progress periodically
-                if local_attempts.is_multiple_of(10_000) {
-                    total_attempts.fetch_add(10_000, Ordering::Relaxed);
-                    local_attempts = 0;
-                }
-
-                // Check max attempts
-                if let Some(max) = max_attempts
-                    && total_attempts.load(Ordering::Relaxed) >= max
-                {
-                    found.store(true, Ordering::Relaxed);
-                    break;
-                }
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    // Drop the original sender so rx.recv() will return Err when all threads are done
     drop(tx);
 
-    // Progress reporter (if not quiet)
-    let progress_handle = if !quiet {
-        let total_attempts = Arc::clone(&total_attempts);
-        let found = Arc::clone(&found);
-        Some(std::thread::spawn(move || {
-            let mut last_count = 0;
-            loop {
-                std::thread::sleep(Duration::from_secs(1));
-                if found.load(Ordering::Relaxed) {
-                    break;
-                }
-                let current = total_attempts.load(Ordering::Relaxed);
-                let rate = current.saturating_sub(last_count);
-                last_count = current;
-                print!(
-                    "\rSearching... ({} attempts, {} keys/sec)  ",
-                    format_number(current),
-                    format_number(rate)
-                );
-                io::stdout().flush().ok();
-            }
-        }))
-    } else {
-        None
-    };
-
-    // Wait for result
     let result = match rx.recv() {
-        Ok(result) => {
-            if !quiet {
-                println!("\r\n✓ Found matching key!                                   ");
-                println!();
-            }
-            result
-        }
+        Ok(result) => result,
         Err(_) => {
-            // All threads finished without finding a match
             if !quiet {
                 if let Some(max) = max_attempts {
                     println!("\r\n✗ No match found within {} attempts", max);
@@ -151,20 +85,99 @@ pub fn run(
         }
     };
 
-    // Wait for all threads to finish
     for handle in handles {
         handle.join().ok();
     }
-
     if let Some(h) = progress_handle {
         h.join().ok();
     }
 
-    let elapsed = start_time.elapsed();
-    let rate = result.attempts as f64 / elapsed.as_secs_f64();
+    Ok(result)
+}
 
-    // Display result
+fn worker_loop(
+    prefix: &str,
+    max_attempts: Option<u64>,
+    found: &AtomicBool,
+    total_attempts: &AtomicU64,
+    tx: mpsc::Sender<VanityResult>,
+) {
+    let mut local_attempts = 0u64;
+
+    loop {
+        if found.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let secret_key = SecretKey::generate();
+        let endpoint_id = secret_key.public();
+        let base32_id = data_encoding::BASE32_NOPAD
+            .encode(endpoint_id.as_bytes())
+            .to_lowercase();
+
+        local_attempts += 1;
+
+        if base32_id.starts_with(prefix) {
+            found.store(true, Ordering::Relaxed);
+            total_attempts.fetch_add(local_attempts, Ordering::Relaxed);
+            let _ = tx.send(VanityResult {
+                secret_key,
+                endpoint_id,
+                base32_id,
+                attempts: total_attempts.load(Ordering::Relaxed),
+            });
+            break;
+        }
+
+        if local_attempts.is_multiple_of(10_000) {
+            total_attempts.fetch_add(10_000, Ordering::Relaxed);
+            local_attempts = 0;
+        }
+
+        if let Some(max) = max_attempts
+            && total_attempts.load(Ordering::Relaxed) >= max
+        {
+            found.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
+}
+
+fn progress_loop(found: &AtomicBool, total_attempts: &AtomicU64) {
+    let mut last_count = 0;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        if found.load(Ordering::Relaxed) {
+            break;
+        }
+        let current = total_attempts.load(Ordering::Relaxed);
+        let rate = current.saturating_sub(last_count);
+        last_count = current;
+        print!(
+            "\rSearching... ({} attempts, {} keys/sec)  ",
+            format_number(current),
+            format_number(rate)
+        );
+        io::stdout().flush().ok();
+    }
+}
+
+fn print_search_banner(prefix: &str, num_threads: usize, prefix_lower: &str) {
+    println!(
+        "\nSearching for vanity address with prefix \"{}\"...",
+        prefix
+    );
+    println!("Threads: {}", num_threads);
+    print_difficulty_estimate(prefix_lower);
+    println!();
+}
+
+fn display_result(result: &VanityResult, elapsed: Duration, quiet: bool) -> Result<()> {
     if !quiet {
+        println!("\r\n✓ Found matching key!                                   ");
+        println!();
+        let rate = result.attempts as f64 / elapsed.as_secs_f64();
+
         println!("Node ID:");
         println!("  Base32:  {}", result.base32_id);
         println!("  Hex:     {}", hex::encode(result.endpoint_id.as_bytes()));
@@ -176,23 +189,27 @@ pub fn run(
         println!("Time:      {:.1} seconds", elapsed.as_secs_f64());
         println!("Rate:      {} keys/second", format_number(rate as u64));
         println!();
-
-        // Always display the secret key so it's not lost
         println!("Secret Key (hex):");
         println!("  {}", hex::encode(result.secret_key.to_bytes()));
         println!();
         println!("⚠️  Save this secret key! It cannot be recovered if lost.");
         println!();
     } else {
-        // Quiet mode: just output the base32 ID
         println!("{}", result.base32_id);
     }
+    Ok(())
+}
 
-    // Handle saving
+fn handle_save(
+    result: &VanityResult,
+    save: bool,
+    output: Option<String>,
+    quiet: bool,
+    prefix: &str,
+) -> Result<()> {
     let should_save = if save || output.is_some() {
         true
     } else if !quiet {
-        // Prompt to save interactively
         print!("Save this key now? (Y/n) ");
         io::stdout().flush()?;
         let mut input = String::new();
@@ -212,7 +229,6 @@ pub fn run(
         } else {
             let key_path = keys::key_path();
 
-            // Check if key already exists
             if key_path.exists() && !quiet {
                 print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
                 io::stdout().flush()?;
@@ -227,7 +243,6 @@ pub fn run(
                 }
             }
 
-            // Try to save the key
             let key_path_str = key_path
                 .to_str()
                 .ok_or_else(|| anyhow!("Key path contains invalid UTF-8"))?;
@@ -278,7 +293,6 @@ fn validate_prefix(prefix: &str) -> Result<()> {
         ));
     }
 
-    // Check for invalid base32 characters
     let valid_chars = "abcdefghijklmnopqrstuvwxyz234567";
     for c in prefix.chars() {
         if !valid_chars.contains(c.to_ascii_lowercase()) {
@@ -289,7 +303,6 @@ fn validate_prefix(prefix: &str) -> Result<()> {
         }
     }
 
-    // Warn about very long prefixes
     if prefix.len() >= 6 {
         let difficulty = 32_u64.pow(prefix.len() as u32);
         println!(
@@ -336,15 +349,12 @@ fn format_number(n: u64) -> String {
 fn save_key_to_file(secret_key: &SecretKey, path: &str) -> Result<()> {
     let path_buf = std::path::PathBuf::from(path);
 
-    // Create parent directory if it doesn't exist
     if let Some(parent) = path_buf.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // Write key file
     fs::write(&path_buf, secret_key.to_bytes())?;
 
-    // Set permissions to 0600 (owner read/write only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
