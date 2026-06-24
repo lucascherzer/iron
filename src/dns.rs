@@ -135,109 +135,112 @@ impl RequestHandler for IronDnsHandler {
             Ok(info) => info,
             Err(e) => {
                 warn!("Failed to parse DNS request: {}", e);
-                let response = MessageResponseBuilder::from_message_request(request)
-                    .error_msg(request.header(), ResponseCode::FormErr);
-                return match response_handle.send_response(response).await {
-                    Ok(info) => info,
-                    Err(e) => {
-                        warn!("Failed to send error response: {}", e);
-                        ResponseInfo::from(*request.header())
-                    }
-                };
+                return self
+                    .send_error_response(request, &mut response_handle, ResponseCode::FormErr)
+                    .await;
             }
         };
         let query = request_info.query;
 
-        // Only handle .iron domains
-        // Return REFUSED for non-.iron domains (RFC 1035: server refuses operation for policy reasons)
-        // This tells resolvers "I don't handle this domain" vs NXDOMAIN "domain doesn't exist"
         if !query.name().to_string().ends_with(".iron.") {
-            let response = MessageResponseBuilder::from_message_request(request)
-                .error_msg(request.header(), ResponseCode::Refused);
-            return match response_handle.send_response(response).await {
-                Ok(info) => info,
-                Err(e) => {
-                    warn!("Failed to send REFUSED response: {}", e);
-                    ResponseInfo::from(*request.header())
-                }
-            };
+            return self
+                .send_error_response(request, &mut response_handle, ResponseCode::Refused)
+                .await;
         }
 
-        // Log only .iron domain queries (reduces noise from systemd-resolved fallback queries)
         trace!("DNS query: {} {:?}", query.name(), query.query_type());
 
-        // Only handle AAAA queries for .iron domains
-        // For other query types (A, MX, etc.), return authoritative empty answer
-        // This tells resolvers: "I'm authoritative for this domain, but it has no A record"
         if query.query_type() != RecordType::AAAA {
             trace!(
                 "Not an AAAA query for .iron domain (got {:?}), returning authoritative empty answer",
                 query.query_type()
             );
-
-            // Return authoritative NOERROR with SOA record in authority section
-            // This is the correct DNS response for "domain exists but no record of this type"
-            let mut header = Header::response_from_request(request.header());
-            header.set_authoritative(true);
-            header.set_response_code(ResponseCode::NoError);
-
-            // Build response with empty answer section
-            // The authoritative flag tells clients not to retry
-            let response = MessageResponseBuilder::from_message_request(request).build(
-                header,
-                &[],
-                &[],
-                &[],
-                &[],
-            );
-            return match response_handle.send_response(response).await {
-                Ok(info) => info,
-                Err(e) => {
-                    warn!("Failed to send empty AAAA response: {}", e);
-                    ResponseInfo::from(*request.header())
-                }
-            };
+            return self
+                .send_empty_authoritative(request, &mut response_handle)
+                .await;
         }
 
-        // Handle AAAA query
         if let Some(ipv6) = self.handle_aaaa_query(query.name()) {
-            let record = Record::from_rdata(
-                query.name().into(),
-                300, // TTL in seconds
-                RData::AAAA(ipv6.into()),
-            );
-
-            let mut header = Header::response_from_request(request.header());
-            header.set_authoritative(true);
-            header.set_response_code(ResponseCode::NoError);
-
-            let records = vec![record];
-            let response = MessageResponseBuilder::from_message_request(request).build(
-                header,
-                &records,
-                &[],
-                &[],
-                &[],
-            );
-
-            match response_handle.send_response(response).await {
-                Ok(info) => info,
-                Err(e) => {
-                    warn!("Failed to send AAAA response for {}: {}", query.name(), e);
-                    ResponseInfo::from(*request.header())
-                }
-            }
+            self.send_aaaa_response(request, &mut response_handle, ipv6, query.name())
+                .await
         } else {
-            // Invalid domain format (couldn't parse EndpointId)
             warn!("Failed to parse EndpointId from {}", query.name());
-            let response = MessageResponseBuilder::from_message_request(request)
-                .error_msg(request.header(), ResponseCode::NXDomain);
-            match response_handle.send_response(response).await {
-                Ok(info) => info,
-                Err(e) => {
-                    warn!("Failed to send NXDOMAIN response: {}", e);
-                    ResponseInfo::from(*request.header())
-                }
+            self.send_error_response(request, &mut response_handle, ResponseCode::NXDomain)
+                .await
+        }
+    }
+}
+
+impl IronDnsHandler {
+    async fn send_error_response<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &mut R,
+        code: ResponseCode,
+    ) -> ResponseInfo {
+        let response = MessageResponseBuilder::from_message_request(request)
+            .error_msg(request.header(), code);
+        match response_handle.send_response(response).await {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("Failed to send error response: {}", e);
+                ResponseInfo::from(*request.header())
+            }
+        }
+    }
+
+    async fn send_empty_authoritative<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &mut R,
+    ) -> ResponseInfo {
+        let mut header = Header::response_from_request(request.header());
+        header.set_authoritative(true);
+        header.set_response_code(ResponseCode::NoError);
+        let response = MessageResponseBuilder::from_message_request(request).build(
+            header,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        match response_handle.send_response(response).await {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("Failed to send empty AAAA response: {}", e);
+                ResponseInfo::from(*request.header())
+            }
+        }
+    }
+
+    async fn send_aaaa_response<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &mut R,
+        ipv6: Ipv6Addr,
+        name: &LowerName,
+    ) -> ResponseInfo {
+        let record = Record::from_rdata(
+            name.into(),
+            300,
+            RData::AAAA(ipv6.into()),
+        );
+        let mut header = Header::response_from_request(request.header());
+        header.set_authoritative(true);
+        header.set_response_code(ResponseCode::NoError);
+        let records = vec![record];
+        let response = MessageResponseBuilder::from_message_request(request).build(
+            header,
+            &records,
+            &[],
+            &[],
+            &[],
+        );
+        match response_handle.send_response(response).await {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("Failed to send AAAA response for {}: {}", name, e);
+                ResponseInfo::from(*request.header())
             }
         }
     }
