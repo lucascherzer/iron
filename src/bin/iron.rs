@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iron::IronNode;
 use iron::dns_config;
+use iron::node::IronNodeConfig;
 use tracing::{error, info};
 
 mod commands;
@@ -291,7 +292,14 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
 
     // Initialize and start iron node
     info!("Initializing iron node...");
-    let node = IronNode::new().await?;
+    let config = IronNodeConfig::from_env();
+    let has_custom_config = config.relay_url.is_some() || !config.peers.is_empty();
+    let node = if has_custom_config {
+        info!("Using custom relay/peer configuration from environment");
+        IronNode::with_config(&config).await?
+    } else {
+        IronNode::new().await?
+    };
 
     // Get a reference to the registry for saving on shutdown
     let registry = node.registry().clone();

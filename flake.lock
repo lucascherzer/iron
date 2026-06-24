@@ -49,6 +49,22 @@
         "type": "github"
       }
     },
+    "iroh-repo": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781181119,
+        "narHash": "sha256-VDnPZF5renXmJZZFkzxjpnqHr8Enss8cF7vlqIPcU10=",
+        "owner": "n0-computer",
+        "repo": "iroh",
+        "rev": "01e74bc1ec78a8a96ae507b4a3ecca99f166599f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "n0-computer",
+        "repo": "iroh",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1781607440,
@@ -70,6 +86,7 @@
         "advisory-db": "advisory-db",
         "crane": "crane",
         "flake-utils": "flake-utils",
+        "iroh-repo": "iroh-repo",
         "nixpkgs": "nixpkgs"
       }
     },

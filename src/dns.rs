@@ -178,8 +178,8 @@ impl IronDnsHandler {
         response_handle: &mut R,
         code: ResponseCode,
     ) -> ResponseInfo {
-        let response = MessageResponseBuilder::from_message_request(request)
-            .error_msg(request.header(), code);
+        let response =
+            MessageResponseBuilder::from_message_request(request).error_msg(request.header(), code);
         match response_handle.send_response(response).await {
             Ok(info) => info,
             Err(e) => {
@@ -197,13 +197,8 @@ impl IronDnsHandler {
         let mut header = Header::response_from_request(request.header());
         header.set_authoritative(true);
         header.set_response_code(ResponseCode::NoError);
-        let response = MessageResponseBuilder::from_message_request(request).build(
-            header,
-            &[],
-            &[],
-            &[],
-            &[],
-        );
+        let response =
+            MessageResponseBuilder::from_message_request(request).build(header, &[], &[], &[], &[]);
         match response_handle.send_response(response).await {
             Ok(info) => info,
             Err(e) => {
@@ -220,11 +215,7 @@ impl IronDnsHandler {
         ipv6: Ipv6Addr,
         name: &LowerName,
     ) -> ResponseInfo {
-        let record = Record::from_rdata(
-            name.into(),
-            300,
-            RData::AAAA(ipv6.into()),
-        );
+        let record = Record::from_rdata(name.into(), 300, RData::AAAA(ipv6.into()));
         let mut header = Header::response_from_request(request.header());
         header.set_authoritative(true);
         header.set_response_code(ResponseCode::NoError);

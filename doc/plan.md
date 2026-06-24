@@ -14,7 +14,31 @@
 - 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
 
-## Recent Updates (Jan 21, 2026)
+## Recent Updates (Jun 26, 2026)
+
+### ✅ VM Tests Refactored: tc netem replaces pkill - COMPLETE!
+- **Problem**: The `tests/vm/reconnect-test.nix` used `pkill -f 'iron serve'` mid-transfer to simulate packet loss. This was fragile, slow (required process restart), and didn't test real network degradation.
+- **Fix**: Replaced with `tc qdisc add dev eth0 root netem loss 10%` — kernel-level packet loss applied to the VM's network interface. iron's TUN packets go through QUIC → eth0, so dropping packets there simulates a lossy link. The iron process stays running.
+- **New test**: `tests/vm/lossy-network-test.nix` — starts both nodes, applies 10% loss on nodeA's eth0, sends 10MB of deterministic data via TCP over iron's tunnel, verifies SHA256 integrity.
+- **How it works**: The test driver (serial console) is unaffected by `tc` on eth0 — only VM-to-VM traffic experiences loss. QUIC retransmits dropped packets; TCP over iron handles the rest.
+- **Files Modified**:
+  - `tests/vm/lossy-network-test.nix`: New file replacing reconnect-test.nix
+  - `tests/vm/reconnect-test.nix`: Removed
+  - `flake.nix`: `iron-vm-reconnect-test` → `iron-vm-lossy-network-test`
+- **Status**: ✅ COMPLETE - Lossy network test using kernel netem, ready for future datagram mode testing
+
+### ✅ Bounded Channel Backpressure - COMPLETE!
+- **Problem**: Unbounded `mpsc::unbounded_channel()` allowed stale TCP retransmission packets to accumulate during QUIC disconnections. After reconnection, all buffered packets were flushed, causing the remote peer to accept stale data (correct TCP seqnums) and produce garbled terminal output.
+- **Fix**: Replaced unbounded channels with bounded `mpsc::channel(1024)` in `src/node.rs:69-71`, with a `const CHANNEL_BUFFER_SIZE: usize = 1024`.
+- **How it works**: When the channel fills up (QUIC connection down), the TUN read loop blocks, preventing the OS from thinking packets are being delivered. This creates backpressure that lets the OS TCP stack properly detect the dead connection and stop retransmitting.
+- **Files Modified**:
+  - `src/node.rs`: Added `CHANNEL_BUFFER_SIZE` const, switched to `mpsc::channel()`
+  - `src/tun.rs`: Channel types `UnboundedSender/Receiver` → `Sender/Receiver`, `send()` → `send().await`
+  - `src/protocol.rs`: Same type changes, `send()` → `send().await`
+  - `tests/integration.rs`: Updated channel creation calls
+- **Status**: ✅ COMPLETE - All 75 tests passing, `nix flake check` passing
+
+## Previous Updates (Jan 21, 2026)
 
 ### ✅ Packet Abstraction Refactor (Phase 1) - COMPLETE!
 - **Added type-safe Packet enum** to `src/packet.rs` with comprehensive test coverage

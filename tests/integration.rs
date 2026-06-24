@@ -103,8 +103,8 @@ async fn test_tun_os_to_network_packet_flow() {
     let dest_ipv6 = registry.get_or_assign_ip(endpoint_id);
 
     // Create channels
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, mut to_network_rx) = mpsc::channel(1024);
+    let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
 
     // Create a node endpoint ID and get its IPv6
     let node_id = test_endpoint_id(99);
@@ -185,8 +185,8 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     let endpoint_a = test_endpoint_id(1);
     let ipv6_a = registry_a.get_or_assign_ip(endpoint_a);
 
-    let (to_network_tx_a, mut to_network_rx_a) = mpsc::unbounded_channel();
-    let (_from_network_tx_a, from_network_rx_a) = mpsc::unbounded_channel();
+    let (to_network_tx_a, mut to_network_rx_a) = mpsc::channel(1024);
+    let (_from_network_tx_a, from_network_rx_a) = mpsc::channel(1024);
     let tun_a = TunInterface::new(
         Arc::clone(&registry_a),
         ipv6_a,
@@ -199,8 +199,8 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     let endpoint_b = test_endpoint_id(2);
     let ipv6_b = registry_b.get_or_assign_ip(endpoint_b);
 
-    let (_to_network_tx_b, _to_network_rx_b) = mpsc::unbounded_channel();
-    let (from_network_tx_b, from_network_rx_b) = mpsc::unbounded_channel();
+    let (_to_network_tx_b, _to_network_rx_b) = mpsc::channel(1024);
+    let (from_network_tx_b, from_network_rx_b) = mpsc::channel(1024);
     let _tun_b = TunInterface::new(
         Arc::clone(&registry_b),
         ipv6_b,
@@ -249,6 +249,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     // Node B receives packet via channel
     from_network_tx_b
         .send(packet_bytes)
+        .await
         .expect("Send to Node B TUN");
 
     // In real scenario, Node B's TUN would write this to device,
@@ -263,8 +264,8 @@ async fn test_packet_to_unregistered_destination() {
     let node_id = test_endpoint_id(99);
     let node_ipv6 = registry.get_or_assign_ip(node_id);
 
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, mut to_network_rx) = mpsc::channel(1024);
+    let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
     let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
 
     // Create packet to unknown destination
@@ -337,8 +338,8 @@ async fn test_concurrent_packet_processing() {
     let node_id = test_endpoint_id(99);
     let node_ipv6 = registry.get_or_assign_ip(node_id);
 
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, mut to_network_rx) = mpsc::channel(1024);
+    let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
     let tun = Arc::new(TunInterface::new(
         Arc::clone(&registry),
         node_ipv6,
@@ -394,8 +395,8 @@ fn test_tun_interface_public_api() {
     let node_id = test_endpoint_id(99);
     let node_ipv6 = registry.get_or_assign_ip(node_id);
 
-    let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
-    let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, _to_network_rx) = mpsc::channel(1024);
+    let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
 
     let _tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
     // Verify constructor is public and accessible
