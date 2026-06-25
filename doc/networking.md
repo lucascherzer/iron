@@ -111,7 +111,7 @@ abc123def456...xyz789.iron  →  fd69:726f::xxxx:xxxx:xxxx:xxxx
 - **Type**: TUN (Layer 3, IP packets only)
 - **Address**: `fd69:726f::1` (gateway address)
 - **Netmask**: `/32` (route entire fd69:726f::/32 network)
-- **MTU**: 1420 bytes (accounts for QUIC/UDP overhead)
+- **MTU**: 1280 bytes (IPv6 minimum link MTU, safe for QUIC datagrams)
 - **Flags**: 
   - `IFF_TUN` (not TAP)
   - `IFF_NO_PI` on Linux (no packet info header)
@@ -184,53 +184,48 @@ Application
 
 ### ALPN Protocol
 
-**Protocol ID**: `b"iron/packet/0"`
+**Protocol ID**: `b"iron/packet/1"`
 
 **Negotiation**:
 ```rust
-endpoint.connect(peer_addr, b"iron/packet/0").await?;
+endpoint.connect(peer_addr, b"iron/packet/1").await?;
 ```
 
 ### Connection Management
 
 **Strategy**: One QUIC connection per remote EndpointId
-- Persistent connections (no reconnect per packet)
-- Bi-directional streams for packet forwarding
+- Connections cached in a `DashMap`, created on first send to a peer or via the accept loop
 - Leverage iroh's NAT traversal and relay servers
 
 **Connection Lifecycle**:
-1. First packet to new EndpointId triggers connection
-2. Connection maintained while traffic flows
-3. Idle timeout (configurable, default 30s)
-4. Reconnect on next packet if timed out
+1. First packet to new EndpointId triggers `endpoint.connect()`
+2. Accepted incoming connections cached for reuse
+3. Failed sends evict the cached connection and retry with a fresh one
 
 ### Packet Encapsulation
 
-**Over QUIC Streams**:
+**Over QUIC Datagrams** (unreliable, unordered):
 
-**Current Implementation**: Stream per packet with connection pooling
 ```rust
-// Open bi-directional stream per packet
-let (mut send, _recv) = conn.open_bi().await?;
-send.write_all(packet).await?;
-send.finish()?;
+// Send packet as a QUIC datagram
+conn.send_datagram(Bytes::from(packet_bytes))?;
 ```
 
-**Connection Pooling Optimization**:
-- Maintains cache of QUIC connections per EndpointId (`DashMap<EndpointId, Connection>`)
-- Reuses existing connections instead of repeated handshakes
-- Automatically retries with new connection if cached connection is stale
-- Significant performance improvement over naive per-packet connect
+**Receive**:
+```rust
+// Read an incoming datagram from a peer connection
+let datagram = conn.read_datagram().await?;
+```
 
-**Why Not Framed Streams?**
-- Stream-per-packet is simpler and sufficient for current throughput
-- Connection pooling eliminates most handshake overhead
-- Can migrate to framed streams later if needed
+Using datagrams avoids the TCP-over-TCP double-retransmit problem:
+inner TCP connections handle their own loss recovery; the mesh layer
+does not re-do that work. This matches how IP itself is a best-effort
+protocol — reliability is the transport layer's job.
 
 **Performance Characteristics**:
-- First packet to peer: Full QUIC handshake (~1-2 RTT)
-- Subsequent packets: Reuse cached connection (~0 RTT for stream setup)
-- Stale connection: Automatic retry with new connection
+- Per-packet cost: zero (single `send_datagram` call, no handshake)
+- No head-of-line blocking
+- Packet loss → inner TCP retransmits (same as any real network)
 
 ### NAT Traversal
 

@@ -35,13 +35,12 @@
   - `src/protocol.rs`: Updated channel types and packet handling
   - `src/tun.rs`: Updated channel types and wrap/unwrap logic
   - `tests/integration.rs`: Updated assertions to use `Packet::as_bytes()`
-- **Wire Format**: Still uses raw bytes on QUIC streams (ALPN: `iron/packet/0`)
+- **Wire Format**: Raw bytes over QUIC datagrams (ALPN: `iron/packet/1`)
 - **Next Steps**: 
-  - Phase 2: Bump ALPN to `iron/packet/1`, add postcard serialization on wire
   - Phase 3: Add `Packet::Onion` variant for onion routing
   - Phase 3: Add `Packet::Auth` variant for firewall authentication
-- **Test Count**: 75 tests (67 existing + 8 new packet tests)
-- **Status**: ✅ COMPLETE - Foundation ready for future features
+- **Test Count**: 74 tests (54 unit + 4 CLI + 16 integration)
+- **Status**: ✅ COMPLETE - Switched from streams to datagrams
 
 ### ✅ Protocol Module Test Coverage - COMPLETE!
 - **Added 15 comprehensive unit tests** to `src/protocol.rs` (previously had ZERO tests)
@@ -277,14 +276,14 @@ pub async fn run(mut self) -> Result<()> {
 **TUN Configuration**:
 - IPv6 only (Layer3)
 - Link-local IPv4: `169.254.0.1` (required but unused)
-- MTU: 1420 bytes (WireGuard standard, accounts for QUIC overhead)
+- MTU: 1280 bytes (IPv6 minimum link MTU, safe for QUIC datagrams)
 - Platform-specific naming: `utun` (macOS), `iron0` (Linux)
 
 ### Implementation Tasks
 
 - ✅ **4.1** Implement TUN device creation
   - Platform-specific configuration (macOS utun, Linux iron0) ✅
-  - Configure Layer3, MTU 1420 ✅
+  - Configure Layer3, MTU 1280 ✅
   - Requires root/sudo privileges (documented) ✅
 - ✅ **4.2** Implement packet reader loop
   - Use `AsyncDevice::into_framed()` for clean stream API ✅
@@ -295,7 +294,7 @@ pub async fn run(mut self) -> Result<()> {
   - Graceful error handling (log warnings, don't crash) ✅
   - Phase 5 integration point marked with TODO ✅
 - ✅ **4.4** Implement outbound packet writer
-  - Receive packets via `mpsc::unbounded_channel` ✅
+  - Receive packets via `mpsc::channel(1024)` ✅
   - Write to TUN device in tokio::select! loop ✅
   - Proper error handling ✅
 - ✅ **4.5** Write unit tests following AGENTS.md pattern
@@ -323,7 +322,7 @@ pub async fn run(mut self) -> Result<()> {
 - ✅ Integration point with Phase 5 clearly marked
 
 **Key Implementation Notes**:
-- Uses `mpsc::unbounded_channel` for outbound packets (from network to OS)
+- Uses `mpsc::channel(1024)` for bounded backpressure on packet flow
 - TUN interface consumes itself in `run()` to take ownership of channel receiver
 - Platform-specific device naming via `tun_name()` (macOS: utun, Linux: iron0)
 - Requires root/sudo privileges to create TUN device
@@ -429,34 +428,41 @@ Initialize iroh `Endpoint` and implement packet transport protocol.
 
 ### Design Specifications
 
-**ALPN Protocol**: `b"iron/packet/0"`
-- Version 0 for initial implementation
-- Identifies iron packet traffic on QUIC connections
+**ALPN Protocol**: `b"iron/packet/1"`
+- Versioned ALPN — `iron/packet/0` (stream-based) and `iron/packet/1` (datagram-based) are incompatible
 
 **Connection Management**:
 - One QUIC connection per remote EndpointId
-- Use bi-directional streams for packet forwarding
+- Connections cached in a DashMap, reused across packets
 - Leverage iroh's NAT traversal and relay servers
 
-**Packet Format** (over QUIC streams):
-- Raw packet data sent directly over QUIC stream
-- Stream-per-packet approach for simplicity
-- Source address verification on receive
+**Packet Format** (over QUIC datagrams):
+- Raw packet data sent as a QUIC datagram
+- No stream open/finish per packet — single `send_datagram()` call
+- Source address rewritten on receive (anti-spoofing)
+
+### Migration from Streams (v0) to Datagrams (v1)
+
+- **Why**: Eliminates TCP-over-TCP double-retransmit, reduces per-packet overhead, simpler code
+- **Changed**: `conn.open_bi() → conn.send_datagram()`, `conn.accept_bi() → conn.read_datagram()`
+- **Removed**: Connection TTL-based eviction, `CachedConnection` struct, per-packet stream overhead
+- **MTU**: Reduced from 1420 → 1280 (IPv6 minimum link MTU, safe for QUIC datagrams)
+- **Channel type**: Switched from unbounded to bounded (1024) for backpressure
 
 ### Implementation Tasks
 
 - ✅ **5.1** Initialize iroh Endpoint in `IronNode::new()`
-  - Configured ALPN protocol `iron/packet/0` ✅
+  - Configured ALPN protocol `iron/packet/1` ✅
   - Endpoint initialized with default secret key ✅
   - Started endpoint listening ✅
 - ✅ **5.2** Implement connection establishment
-  - Accept incoming connections with `iron/packet/0` ALPN ✅
-  - Create connection handler task per peer ✅
+  - Accept incoming connections with `iron/packet/1` ALPN ✅
+  - Cache accepted connections for send-path reuse ✅
   - Implemented in `IronProtocol::accept_loop()` ✅
 - ✅ **5.3** Implement packet forwarding
-  - TUN → Iroh: Send packets over QUIC stream ✅
-  - Iroh → TUN: Receive packets from stream, write to TUN ✅
-  - Implemented in `IronProtocol::send_packet()` and `handle_connection()` ✅
+  - TUN → Iroh: Send packets as QUIC datagrams ✅
+  - Iroh → TUN: Receive datagrams from connection, write to TUN ✅
+  - Implemented in `IronProtocol::send_packet()` and `handle_datagram_reader()` ✅
 - ✅ **5.4** Integrate with TUN interface
   - Connected TUN's `to_network_tx` to iroh send loop ✅
   - Connected iroh receive to TUN's `from_network_tx` ✅
@@ -476,15 +482,15 @@ Initialize iroh `Endpoint` and implement packet transport protocol.
 - ⏸️ End-to-end ping testing (requires Phase 6 CLI)
 
 **Key Implementation Notes**:
-- **File**: `src/protocol.rs` (new module, 236 lines)
-- ALPN constant: `iron/packet/0`
+- **File**: `src/protocol.rs` (~280 lines)
+- ALPN constant: `iron/packet/1` (v0 was stream-based, v1 is datagram-based)
 - Two concurrent tasks: send loop and accept loop
 - Source address verification prevents IP spoofing
 - Graceful error handling (warnings, not crashes)
-- Uses `Connection::open_bi()` for sending
-- Uses `Connection::accept_bi()` for receiving
-- Each connection handled in separate tokio task
-- Maximum packet size: 1500 bytes (MTU)
+- Uses `Connection::send_datagram()` for sending (QUIC datagrams)
+- Uses `Connection::read_datagram()` for receiving
+- Each accepted connection spawns a datagram reader task
+- Maximum packet size: 1280 bytes (IPv6 minimum link MTU)
 
 ---
 

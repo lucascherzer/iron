@@ -29,7 +29,7 @@ config
     .address((169, 254, 0, 1))
     .destination((169, 254, 0, 2))
     .netmask((255, 255, 255, 0))  // <-- Added this
-    .mtu(1420)
+    .mtu(1280)
     .up();
 ```
 
@@ -117,7 +117,7 @@ When iron starts successfully:
 
 The TUN interface should show:
 ```
-utunX: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1420
+utunX: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280
     inet6 fd69:726f::1 prefixlen 32
 ```
 

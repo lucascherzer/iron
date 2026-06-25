@@ -93,12 +93,9 @@ to_network_tx.send((endpoint_id, packet.to_vec()))?;
 // IronProtocol receives from channel
 let (endpoint_id, packet_bytes) = to_network_rx.recv().await?;
 
-// Open QUIC bi-directional stream
-let mut stream = endpoint.connect(endpoint_id, b"iron/packet/0").await?;
-
-// Write packet
-stream.write_all(&packet_bytes).await?;
-stream.finish().await?;
+// Send as QUIC datagram (unreliable, no stream overhead)
+let conn = get_or_create_connection(endpoint_id).await?;
+conn.send_datagram(Bytes::from(packet_bytes))?;
 ```
 
 ---
@@ -116,31 +113,16 @@ loop {
     let sender_endpoint_id = conn.remote_id(); // Iroh tells us who sent it!
     
     tokio::spawn(async move {
-        let (mut send, mut recv) = conn.accept_bi().await?;
-        let packet_bytes = recv.read_to_end(1500).await?;
-        
-        // Packet structure:
-        // ┌─────────────────────────────────────────┐
-        // │ IPv6 Header (built by sender)           │
-        // │  - Source: fd69:726f::yyyy (sender)     │
-        // │  - Destination: fd69:726f::1 (us)       │
-        // │  - Next Header: TCP (6)                 │
-        // ├─────────────────────────────────────────┤
-        // │ TCP Header                              │
-        // │  - Source Port: 80                      │
-        // │  - Destination Port: 54321 (our browser)│
-        // │  - Flags: SYN-ACK                       │
-        // ├─────────────────────────────────────────┤
-        // │ Payload (HTTP response)                 │
-        // └─────────────────────────────────────────┘
-        
-        // Verify source IPv6 matches sender
-        let ipv6_header = Ipv6Header::from_slice(&packet_bytes)?;
-        let expected_src = registry.get_or_assign_ip(sender_endpoint_id);
-        assert_eq!(ipv6_header.0.source_addr(), expected_src);
-        
-        // Send to TUN
-        from_network_tx.send(packet_bytes)?;
+        // Read datagrams directly from the connection (no stream setup)
+        loop {
+            let packet_bytes = conn.read_datagram().await?;
+
+            // Rewrite source IPv6 to sender's derived address (anti-spoofing)
+            let rewritten = rewrite_source_address(packet_bytes.to_vec(), sender_endpoint_id, &registry)?;
+
+            // Send to TUN
+            from_network_tx.send(Packet::raw(rewritten)).await?;
+        }
     });
 }
 ```

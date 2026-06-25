@@ -66,9 +66,9 @@ impl IronNode {
 
         // Create channels for packet flow
         // OS → Network: TUN sends packets to protocol handler
-        let (to_network_tx, to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, to_network_rx) = mpsc::channel(1024);
         // Network → OS: Protocol handler sends packets to TUN
-        let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let (from_network_tx, from_network_rx) = mpsc::channel(1024);
 
         // Initialize DNS resolver
         info!("Creating DNS resolver");

@@ -175,15 +175,20 @@ pub async fn run(&self) -> Result<()> {
 - Local-only deployment means collision risk is acceptably low
 
 ## Iroh Integration
-**ALPN Protocol**: `b"iron/packet/0"`
-- Version 0 for initial implementation
-- Can add versioned protocols later (e.g., `b"iron/packet/1"`)
+**ALPN Protocol**: `b"iron/packet/1"`
+- Versioned ALPN — old stream-based clients on `iron/packet/0` cannot connect
 
-**Connection Strategy**:
-- One QUIC connection per remote EndpointId
-- Bi-directional streams for packet forwarding
-- Leverage iroh's built-in NAT traversal and relay support
-- **Connection pooling**: Cached connections reused to avoid repeated handshakes
+**Transport**:
+- **QUIC datagrams** (unreliable, unordered) for the data plane
+- Connections cached in a DashMap, created on first send or accepted inbound
+- Cached connections reused across packets (no per-packet handshake)
+- Failed datagram sends evict the stale connection and retry
+
+**Why datagrams over streams**:
+- Avoids TCP-over-TCP double-retransmit (inner TCP handles loss recovery)
+- No head-of-line blocking; lower per-packet latency
+- Simpler code: no stream open/finish per packet, no TTL-based eviction
+- Matches IP's best-effort semantics — reliability is the transport layer's job
 
 **Security Features**:
 - Source address rewriting: Packets have source IPv6 rewritten to match authenticated sender

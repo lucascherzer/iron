@@ -48,6 +48,9 @@ rand = "0.9"
 # Async traits
 async-trait = "0.1"
 
+# datagram bytes wrapper
+bytes = "1"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.31", features = ["user"] }

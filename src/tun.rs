@@ -33,10 +33,10 @@ pub struct TunInterface {
     node_ipv6: Ipv6Addr,
     /// Channel for sending packets TO network (OS → iroh)
     /// Format: (destination_endpoint_id, Packet)
-    to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
+    to_network_tx: mpsc::Sender<(EndpointId, Packet)>,
     /// Channel for receiving packets FROM network (iroh → OS)
     /// Format: Packet (with correct source IPv6 already set)
-    from_network_rx: mpsc::UnboundedReceiver<Packet>,
+    from_network_rx: mpsc::Receiver<Packet>,
 }
 
 impl TunInterface {
@@ -51,8 +51,8 @@ impl TunInterface {
     pub fn new(
         registry: Arc<Registry>,
         node_ipv6: Ipv6Addr,
-        to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
-        from_network_rx: mpsc::UnboundedReceiver<Packet>,
+        to_network_tx: mpsc::Sender<(EndpointId, Packet)>,
+        from_network_rx: mpsc::Receiver<Packet>,
     ) -> Self {
         info!("Creating TUN interface with IPv6: {}", node_ipv6);
         Self {
@@ -74,7 +74,7 @@ impl TunInterface {
     ///
     /// - IPv6 only (Layer3)
     /// - Address: Node's derived IPv6 with /32 prefix
-    /// - MTU: 1420 bytes (accounts for QUIC overhead)
+    /// - MTU: 1280 bytes (IPv6 minimum link MTU, safe for QUIC datagrams)
     fn create_device(&self) -> Result<AsyncDevice> {
         info!("Creating TUN device (requires root/sudo)");
         let mut config = Configuration::default();
@@ -87,7 +87,7 @@ impl TunInterface {
             .address((169, 254, 0, 1))
             .netmask((255, 255, 255, 0))
             .destination((169, 254, 0, 2))
-            .mtu(1420)
+            .mtu(1280)
             .up();
 
         #[cfg(target_os = "linux")]
@@ -427,6 +427,7 @@ impl TunInterface {
             // Send to network layer (iroh will handle actual transmission)
             self.to_network_tx
                 .send((endpoint_id, Packet::raw(packet.to_vec())))
+                .await
                 .context("Failed to send packet to network layer")?;
         } else {
             warn!(
@@ -491,8 +492,8 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let endpoint_id = test_endpoint_id(1);
         let node_ipv6 = registry.get_or_assign_ip(endpoint_id);
-        let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
-        let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, _to_network_rx) = mpsc::channel(1024);
+        let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
         let _tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
         // Just verify it constructs
     }
@@ -508,8 +509,8 @@ mod tests {
         let node_endpoint_id = test_endpoint_id(1);
         let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
 
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-        let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(1024);
+        let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
         let tun = TunInterface::new(
             Arc::clone(&registry),
             node_ipv6,
@@ -560,8 +561,8 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let node_endpoint_id = test_endpoint_id(1);
         let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-        let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(1024);
+        let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
         let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
 
         // Create IPv6 packet with unknown destination
@@ -596,8 +597,8 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let node_endpoint_id = test_endpoint_id(1);
         let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
-        let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(1024);
+        let (_from_network_tx, from_network_rx) = mpsc::channel(1024);
         let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
 
         // Invalid packet (too short, version 0)
