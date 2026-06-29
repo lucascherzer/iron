@@ -35,11 +35,11 @@ pub struct IronProtocol {
     /// Receives packets from TUN to send to peers
     to_network_rx: mpsc::Receiver<(EndpointId, Packet)>,
     /// Sends received packets to TUN
-    from_network_tx: mpsc::Sender<Packet>,
-    /// Connection pool: maps EndpointId -> CachedConnection for reuse with TTL eviction
-    connection_pool: Arc<DashMap<EndpointId, CachedConnection>>,
-}
-
+     from_network_tx: mpsc::Sender<Packet>,
+     /// Connection pool: maps EndpointId -> CachedConnection for reuse with TTL eviction
+     connection_pool: Arc<DashMap<EndpointId, CachedConnection>>,
+ }
+ 
 impl IronProtocol {
     /// Creates a new protocol handler
     pub fn new(
@@ -382,9 +382,7 @@ impl IronProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh::RelayMode;
     use iroh::SecretKey;
-    use iroh::address_lookup::memory::MemoryLookup;
     use iroh::endpoint::presets::N0;
     use std::net::Ipv6Addr;
 
@@ -640,7 +638,6 @@ mod tests {
         let secret = SecretKey::generate();
         let endpoint = Endpoint::builder(N0)
             .secret_key(secret)
-            .relay_mode(RelayMode::Disabled)
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await
@@ -665,15 +662,8 @@ mod tests {
         let secret2 = SecretKey::generate();
         let id2 = secret2.public();
 
-        // Use in-memory address lookup so no relay or DNS is needed
-        let lookup = MemoryLookup::new();
-
         let ep1 = Endpoint::builder(N0)
             .secret_key(secret1)
-            // We disable all external relays because the nixos tests
-            // are completely sandboxed without access to any external network.
-            .relay_mode(RelayMode::Disabled)
-            .address_lookup(lookup.clone())
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await
@@ -681,16 +671,10 @@ mod tests {
 
         let ep2 = Endpoint::builder(N0)
             .secret_key(secret2)
-            .relay_mode(RelayMode::Disabled)
-            .address_lookup(lookup.clone())
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await
             .unwrap();
-
-        // Register both endpoints so they can find each other
-        lookup.add_endpoint_info(ep1.addr());
-        lookup.add_endpoint_info(ep2.addr());
 
         // Accept incoming connections on ep2 so ep1's connect succeeds
         let accept_task = tokio::spawn(async move {
@@ -702,8 +686,8 @@ mod tests {
         });
 
         let registry = Arc::new(Registry::new());
-        let (_to_network_tx, to_network_rx) = mpsc::channel(1024);
-        let (from_network_tx, _from_network_rx) = mpsc::channel(1024);
+        let (_to_network_tx, to_network_rx) = mpsc::unbounded_channel();
+        let (from_network_tx, _from_network_rx) = mpsc::unbounded_channel();
 
         let protocol = IronProtocol::new(registry, ep1, to_network_rx, from_network_tx);
 
