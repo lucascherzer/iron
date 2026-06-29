@@ -40,7 +40,7 @@ pkgs.testers.runNixOSTest {
     print(f"Relay URL: {relay_url}")
 
     relay.succeed('echo \'http_bind_addr = "0.0.0.0:3340"\' > /tmp/relay-config.toml')
-    relay.succeed(f"iroh-relay --dev --config-path /tmp/relay-config.toml >& /tmp/relay.log &")
+    relay.succeed("iroh-relay --dev --config-path /tmp/relay-config.toml >& /tmp/relay.log &")
     relay.sleep(2)
     relay.succeed(f"curl -s http://{relay_ip}:3340/health 2>&1")
 
@@ -57,7 +57,7 @@ pkgs.testers.runNixOSTest {
     nodeA.succeed(
         f"IROH_RELAY_URL={relay_url} "
         f"IROH_PEER_B={b_base32}@{relay_url} "
-        f"iron serve --log-level debug >& /tmp/iron-a.log &"
+        "iron serve --log-level debug >& /tmp/iron-a.log &"
     )
     nodeA.sleep(3)
     a_info = json.loads(nodeA.succeed("iron self --format json"))
@@ -69,7 +69,7 @@ pkgs.testers.runNixOSTest {
     nodeB.succeed(
         f"IROH_RELAY_URL={relay_url} "
         f"IROH_PEER_A={a_base32}@{relay_url} "
-        f"iron serve --log-level debug >& /tmp/iron-b.log &"
+        "iron serve --log-level debug >& /tmp/iron-b.log &"
     )
     nodeB.sleep(3)
 
@@ -95,11 +95,12 @@ pkgs.testers.runNixOSTest {
     print(f"Expected hash: {expected_hash}")
 
     # --- Start TCP receiver on node B (listening on iron's TUN IPv6) ---
-    nodeB.succeed(f"python3 -c \"\n"
+    nodeB.succeed(
+        "python3 -c \"\n"
         "import socket, hashlib\n"
         "sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)\n"
         "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
-        "sock.bind(('{b_ipv6}', 9999))\n"
+        f"sock.bind(('{b_ipv6}', 9999))\n"
         "sock.listen(1)\n"
         "conn, addr = sock.accept()\n"
         "hasher = hashlib.sha256()\n"
@@ -112,14 +113,16 @@ pkgs.testers.runNixOSTest {
         "print(hasher.hexdigest())\n"
         "\" >& /tmp/receiver-output.txt &\n"
         "RECEIVER_PID=$!\n"
-        "echo $RECEIVER_PID > /tmp/receiver.pid")
+        "echo $RECEIVER_PID > /tmp/receiver.pid"
+    )
     nodeB.sleep(1)
 
     # --- Send data from A to B via TCP over iron's lossy tunnel ---
-    nodeA.succeed(f"python3 -c \"\n"
+    nodeA.succeed(
+        "python3 -c \"\n"
         "import socket\n"
         "sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)\n"
-        "sock.connect(('{b_ipv6}', 9999))\n"
+        f"sock.connect(('{b_ipv6}', 9999))\n"
         "with open('/tmp/testdata.bin', 'rb') as f:\n"
         "    while True:\n"
         "        chunk = f.read(65536)\n"
@@ -129,7 +132,8 @@ pkgs.testers.runNixOSTest {
         "print('Sender done')\n"
         "\" >& /tmp/sender-output.txt &\n"
         "SENDER_PID=$!\n"
-        "echo $SENDER_PID > /tmp/sender.pid")
+        "echo $SENDER_PID > /tmp/sender.pid"
+    )
 
     # Wait for transfer to complete under lossy conditions
     # QUIC retransmits dropped packets, TCP handles the rest

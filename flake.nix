@@ -125,7 +125,7 @@
               import ./tests/vm/two-node-test.nix {
                 inherit pkgs;
                 ironPackage = iron;
-                relayPackage = irohRelay;
+                relayPackage = irohRelay.irohRelay;
               }
             else
               pkgs.runCommand "iron-vm-two-node-test-skipped" { } ''
@@ -137,7 +137,7 @@
               import ./tests/vm/lossy-network-test.nix {
                 inherit pkgs;
                 ironPackage = iron;
-                relayPackage = irohRelay;
+                relayPackage = irohRelay.irohRelay;
               }
             else
               pkgs.runCommand "iron-vm-lossy-network-test-skipped" { } ''
