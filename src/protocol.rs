@@ -380,6 +380,7 @@ impl IronProtocol {
 mod tests {
     use super::*;
     use iroh::SecretKey;
+    use iroh::address_lookup::memory::MemoryLookup;
     use iroh::endpoint::presets::N0;
     use std::net::Ipv6Addr;
 
@@ -659,9 +660,14 @@ mod tests {
         let secret2 = SecretKey::generate();
         let id2 = secret2.public();
 
+        // Shared in-memory address lookup so ep1 can resolve ep2's address
+        // in-process even when sandboxed.
+        let lookup = MemoryLookup::default();
+
         let ep1 = Endpoint::builder(N0)
             .secret_key(secret1)
             .alpns(vec![ALPN.to_vec()])
+            .address_lookup(lookup.clone())
             .bind()
             .await
             .unwrap();
@@ -669,9 +675,12 @@ mod tests {
         let ep2 = Endpoint::builder(N0)
             .secret_key(secret2)
             .alpns(vec![ALPN.to_vec()])
+            .address_lookup(lookup.clone())
             .bind()
             .await
             .unwrap();
+
+        lookup.add_endpoint_info(ep2.addr());
 
         // Accept incoming connections on ep2 so ep1's connect succeeds
         let accept_task = tokio::spawn(async move {
