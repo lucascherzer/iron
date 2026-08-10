@@ -13,7 +13,7 @@ implementing unit- and integration tests.
 
 # Tests
 
-Simple tests that can be modeled as "this function should produce these outputs
+Simple unit tests that can be modeled as "this function should produce these outputs
 given these inputs" can and should be implemented following this pattern:
 
 ```rs
@@ -28,6 +28,14 @@ fn test_add() {
     }
 }
 ```
+
+### Integration tests
+
+VM-based integration tests live in tests/vm/ and are implemented using the
+NixOS test framework (`pkgs.testers.runNixOSTest`). Use these tests for
+scenarios that require more than one machine or realistic networking/storage
+interactions. This is necessary, as we cannot send data to loopback via the
+iron interface.
 
 # Code Style
 
