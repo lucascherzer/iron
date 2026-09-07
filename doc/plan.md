@@ -10,9 +10,68 @@
 - ✅ Integration Tests: Complete - 16 comprehensive integration tests
 - ✅ **Protocol Module Tests**: 15 unit tests for critical path (source rewriting, packet handling)
 - ✅ **TUN Device Fix**: IPv6 configuration and routing now working
+- ✅ **VM Testing Infrastructure**: Automated multi-node testing with NixOS VMs
 - 🎉 **PROJECT COMPLETE** - All phases implemented and tested!
-- 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
+- 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests) + 3 VM test suites
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
+- 🤖 **CI/CD**: GitHub Actions with automated VM tests on Linux runners
+
+## Recent Updates (Jan 22, 2026)
+
+### ✅ VM Testing Infrastructure - COMPLETE!
+- **Implemented automated multi-node testing** using microvm.nix and NixOS test framework
+- **Three VM test suites created**:
+  1. **Smoke Test** (`tests/vm/smoke-test.nix`) - Single node functionality verification
+     - Key generation and persistence
+     - Node identity retrieval (JSON format)
+     - TUN interface creation
+     - DNS server startup
+     - Self DNS resolution
+     - Run time: ~30-60 seconds
+  2. **Two-Node Test** (`tests/vm/two-node-test.nix`) - Real P2P connectivity testing
+     - Two independent iron nodes
+     - Cross-node DNS resolution
+     - P2P packet delivery (HTTP traffic)
+     - Bidirectional connectivity
+     - Connection establishment verification
+     - Run time: ~2-5 minutes
+  3. **Reliability Test** (`tests/vm/reliability-test.nix`) - TCP reliability and chaos testing
+     - Large data transfer (10MB) with SHA256 verification
+     - Concurrent transfers (5x 2MB simultaneous)
+     - Chaos testing: 5% packet loss, 100ms latency + jitter
+     - Connection drop and reconnect testing
+     - Deterministic data generation with seeded RNG
+     - Run time: ~5-10 minutes
+- **Platform Support**:
+  - ✅ Linux: Full support with QEMU and TAP networking
+  - ⚠️ macOS: Tests automatically skipped (no TAP networking support)
+  - ℹ️ Windows: Untested, likely requires WSL2
+- **CI/CD Integration**:
+  - GitHub Actions workflow created (`.github/workflows/test.yml`)
+  - Runs on Linux runners (ubuntu-latest)
+  - Tests all checks including VM tests on every push/PR
+  - Separate jobs for: Nix checks, VM tests, macOS build verification
+  - KVM support enabled for hardware-accelerated VMs
+  - Cachix integration for faster builds
+- **Flake Integration**:
+  - Added `microvm.nix` input to `flake.nix`
+  - VM tests included in `nix flake check` (Linux only)
+  - Tests can be run individually: `nix build .#checks.x86_64-linux.iron-vm-smoke-test`
+- **Documentation**:
+  - Created `doc/vm-testing.md` with comprehensive guide
+  - Covers test architecture, writing new tests, troubleshooting
+  - Documents platform support and CI integration
+  - Includes performance considerations and future enhancements
+- **Files Added**:
+  - `tests/vm/smoke-test.nix`: Single-node VM test (95 lines)
+  - `tests/vm/two-node-test.nix`: Multi-node VM test (170 lines)
+  - `tests/vm/reliability-test.nix`: Reliability and chaos test (573 lines)
+  - `.github/workflows/test.yml`: CI/CD workflow (127 lines)
+  - `doc/vm-testing.md`: Testing documentation (335 lines)
+- **Files Modified**:
+  - `flake.nix`: Added microvm input, VM test checks
+- **Status**: ✅ COMPLETE - Automated multi-node testing fully operational!
+- **Key Achievement**: Can now verify real P2P connectivity in CI without manual testing
 
 ## Recent Updates (Jan 21, 2026)
 
@@ -582,6 +641,69 @@ tracing-subscriber = "0.3" # Log formatting
 3. Windows (tertiary, requires wintun driver)
 
 ---
+
+## Phase 7: VM Testing Infrastructure ✅ COMPLETE
+
+### Overview
+Automated multi-node testing infrastructure using NixOS VMs to verify real P2P connectivity in isolated environments.
+
+### Implementation Tasks
+- ✅ Add microvm.nix dependency to flake
+- ✅ Create smoke test VM configuration
+  - Single node basic functionality
+  - Key management, DNS, TUN interface
+  - Self-resolution testing
+- ✅ Create two-node test VM configuration
+  - Independent node startup
+  - Cross-node DNS resolution
+  - P2P packet delivery (HTTP)
+  - Bidirectional connectivity
+  - Log verification
+- ✅ Integrate VM tests into flake checks
+  - Linux-only execution
+  - Automatic skip on other platforms
+  - Individual test runners
+- ✅ Create GitHub Actions CI workflow
+  - Nix checks job
+  - VM tests job (with KVM)
+  - macOS build verification
+  - Cachix integration
+- ✅ Write comprehensive documentation
+  - Test architecture
+  - Running tests
+  - Writing new tests
+  - Troubleshooting guide
+  - Platform support matrix
+
+### Test Coverage
+**Smoke Test:**
+- Binary availability
+- Key generation/persistence
+- Node identity (JSON format)
+- TUN interface creation
+- DNS server startup
+- Self DNS resolution
+
+**Two-Node Test:**
+- Two nodes starting independently
+- TUN interfaces on both nodes
+- DNS resolution across nodes
+- P2P packet delivery
+- Bidirectional connectivity
+- Connection establishment logs
+
+### Platform Support
+- ✅ **Linux**: Full support with QEMU/Firecracker + TAP networking
+- ⚠️ **macOS**: Tests skipped (no TAP networking)
+- ℹ️ **Windows**: Untested
+
+### Success Criteria ✅
+- ✅ Tests run on `nix flake check`
+- ✅ Tests pass in GitHub Actions
+- ✅ Real P2P connectivity verified
+- ✅ Documentation complete
+- ✅ Platform-specific handling
+- ✅ Fast enough for CI (<15 min total)
 
 ## Future Enhancements (Post-MVP)
 
