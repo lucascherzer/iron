@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use iron::keys;
+use iron_core::keys;
 use serde_json::json;
 
 pub fn run(
@@ -33,7 +33,7 @@ pub fn run(
         .encode(endpoint_bytes)
         .to_lowercase();
     let domain_name = format!("{}.iron", base32_id);
-    let ipv6_addr = iron::mapping::Registry::derive_ip(endpoint_id);
+    let ipv6_addr = iron_core::mapping::Registry::derive_ip(endpoint_id);
 
     // Single field outputs
     if hex {

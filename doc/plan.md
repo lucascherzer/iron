@@ -21,11 +21,22 @@
   portable packet and DNS logic.
 - Added `TunBackend`/`TunIo`, renamed the portable TUN engine to
   `PacketRouter`, and moved desktop TUN provisioning and DNS system
-  configuration under `platform::desktop`.
+  configuration under `iron-desktop`.
 - Added injected `StatePaths` for persistent state and split the DNS UDP
   frontend from the portable resolver logic.
 - Fixed the `--dns-port` bug: the configured port is now used instead of
   always binding `127.0.0.1:5333`.
+
+### ✅ Workspace Split
+- Split the repository into the portable `iron-core`, desktop
+  `iron-desktop`, and `iron-cli` Cargo crates. Desktop backend and CLI
+  behavior are unchanged; `iron-core` has no TUN or desktop-only deps.
+- New flake check `iron-core-android` builds `iron-core` for
+  `aarch64-linux-android` as a layering guardrail. It needs the Android
+  NDK's C toolchain (ring compiles C in its build script), provided via
+  `pkgsCross.aarch64-android-prebuilt` (unfree, own nixpkgs instance).
+- Next: validate the desktop build on real Linux/macOS machines before
+  starting Android-specific work.
 
 ## Recent Updates (Jan 21, 2026)
 

@@ -1,0 +1,14 @@
+[package]
+name = "iron-desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+iron-core.workspace = true
+tracing.workspace = true
+tun.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use iron::platform::desktop::dns_config;
-use iron::{IronNode, NodeConfig};
+use iron_core::IronNode;
+use iron_desktop::dns_config;
 use tracing::{error, info};
 
 mod commands;
@@ -291,7 +291,7 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
 
     // Initialize and start iron node with desktop platform defaults
     info!("Initializing iron node...");
-    let config = NodeConfig::desktop()?.with_dns_port(dns_port);
+    let config = iron_desktop::desktop_node_config()?.with_dns_port(dns_port);
     let state_paths = config.paths.clone();
     let node = IronNode::new(config).await?;
 
@@ -490,7 +490,7 @@ fn fix_key_directory_ownership() -> Result<()> {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
-    let key_path = iron::keys::key_path();
+    let key_path = iron_core::keys::key_path();
     let config_dir = key_path
         .parent()
         .context("Cannot determine config directory")?;

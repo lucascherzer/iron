@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use iroh::SecretKey;
-use iron::keys;
+use iron_core::keys;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;

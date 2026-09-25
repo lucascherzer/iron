@@ -11,6 +11,23 @@ Check the doc/ directory when making changes to reflect them.
 Agents should strive for: clean, sensibly deduplicated, testable code by
 implementing unit- and integration tests.
 
+# Crate Layout (do not violate)
+
+- `crates/iron-core`: portable engine, shared by all platforms including the
+  planned Android app. **No platform-specific code here**: no TUN device
+  setup, no system commands, no OS resolver config, no `cfg(target_os)`, no
+  OS-bound crates (`tun`, `nix`, ...). Rules and rationale: the crate docs in
+  `crates/iron-core/src/lib.rs`.
+- `crates/iron-desktop`: Linux/macOS implementations of the seams in
+  `iron_core::platform` (TUN provisioning, DNS system config).
+- `crates/iron-cli`: the `iron` binary.
+
+Need OS behavior in the core? Add a trait to `iron_core::platform`, implement it
+in the platform crate, inject it via `NodeConfig`. The `iron-core-android`
+check in `nix flake check` fails if iron-core stops building for Android;
+fix the layering, never weaken that check. Background:
+`doc/proposals/platform-abstraction.md`.
+
 # Tests
 
 Simple tests that can be modeled as "this function should produce these outputs

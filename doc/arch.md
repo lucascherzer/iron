@@ -36,7 +36,7 @@ We require the following components for this to work:
   ensuring consistent EndpointId (using the injected `StatePaths`).
 4. A DNS auto-configuration system that sets up system-level DNS resolution for
   `.iron` domains on supported desktop platforms
-  (`platform::desktop::dns_config`).
+  (`iron_desktop::dns_config`).
 5. A CLI interface providing utilities for node management, key operations, and
   format conversions.
 
@@ -151,7 +151,7 @@ provisions a device and returns raw packet I/O as `TunIo`; `PacketRouter`
 handles packets without knowing whether that I/O came from a desktop TUN
 device or a file descriptor supplied by a future Android `VpnService`.
 `StatePaths` injects persistent storage, and desktop DNS system configuration
-lives in `platform::desktop::dns_config`, separate from the portable
+lives in `crates/iron-desktop/src/dns_config.rs`, separate from the portable
 `IronDnsHandler` resolution logic.
 
 ## Packet Router Architecture

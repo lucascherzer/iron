@@ -1,15 +1,10 @@
-//! Desktop (Linux/macOS) platform implementation.
-//!
-//! Provides [`DesktopTun`], a [`TunBackend`] that creates the TUN device
-//! itself and configures addresses/routes with system commands, and
-//! [`dns_config`], which points the OS resolver at iron's DNS server for
-//! `.iron` domains.
+//! Desktop TUN backend: creates the device itself and configures
+//! addresses/routes with system commands (`ip` on Linux, `ifconfig`/`route`
+//! on macOS).
 
-pub mod dns_config;
-
-use crate::platform::{TunBackend, TunIo};
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use iron_core::platform::{TunBackend, TunIo};
 use std::net::Ipv6Addr;
 use tracing::{debug, error, info, warn};
 use tun::{AsyncDevice, Configuration, Layer};

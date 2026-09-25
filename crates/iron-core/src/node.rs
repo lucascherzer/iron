@@ -16,8 +16,9 @@ use tracing::{error, info, warn};
 /// Platform-dependent pieces an [`IronNode`] is assembled from.
 ///
 /// The node itself is platform-independent; everything OS-specific is
-/// injected here. Desktop callers use [`NodeConfig::desktop`], other
-/// platforms construct the fields explicitly.
+/// injected here. Desktop callers can use
+/// `iron_desktop::desktop_node_config`, while other platforms construct the
+/// fields explicitly.
 pub struct NodeConfig {
     /// Where persistent state (secret key, known-peers cache) lives.
     pub paths: StatePaths,
@@ -27,19 +28,8 @@ pub struct NodeConfig {
     pub tun: Box<dyn TunBackend>,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl NodeConfig {
-    /// Desktop defaults: state in `~/.config/iron`, DNS on `127.0.0.1:5333`,
-    /// self-provisioned TUN device.
-    pub fn desktop() -> Result<Self> {
-        Ok(Self {
-            paths: StatePaths::default_os()?,
-            dns_listen: SocketAddr::from(([127, 0, 0, 1], 5333)),
-            tun: Box::new(crate::platform::desktop::DesktopTun),
-        })
-    }
-
-    /// Same defaults with a different DNS port.
+    /// Set the UDP DNS frontend port.
     pub fn with_dns_port(mut self, port: u16) -> Self {
         self.dns_listen.set_port(port);
         self

@@ -30,10 +30,10 @@ impl DnsResolver {
     ///
     /// This UDP frontend is how `.iron` queries reach the resolver on
     /// desktop, where the OS is configured to send them to a loopback
-    /// socket (see `platform::desktop::dns_config`). Other platforms may
+    /// socket (see `iron_desktop::dns_config`). Other platforms may
     /// deliver queries differently (e.g. Android intercepts DNS packets
     /// arriving over the TUN device); the resolution logic in
-    /// [`IronDnsHandler`] is shared either way.
+    /// `IronDnsHandler` is shared either way.
     ///
     /// # Arguments
     ///

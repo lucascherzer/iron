@@ -8,19 +8,17 @@
 //!
 //! - [`TunBackend`]: provisions a TUN device (creation, addresses, routes)
 //!   and hands back raw packet I/O as [`TunIo`]. On desktop this creates the
-//!   device itself and configures it with system commands ([`desktop`]). On
+//!   device itself and configures it with system commands
+//!   (`iron_desktop::DesktopTun`). On
 //!   Android the device comes pre-provisioned as a file descriptor from
 //!   `VpnService.Builder.establish()`, so a future backend only wraps the fd
 //!   (the `tun` crate supports this via `Configuration::raw_fd`).
 //! - [`crate::paths::StatePaths`]: where persistent state lives, injected
 //!   instead of derived from `$HOME`.
-//! - DNS system integration ([`desktop::dns_config`]): how the OS is told to
+//! - DNS system integration (`iron_desktop::dns_config`): how the OS is told to
 //!   send `.iron` queries to iron's resolver. Desktop uses resolver files /
 //!   systemd-resolved; Android will instead intercept DNS packets arriving
 //!   over the TUN device (see doc/proposals/platform-abstraction.md).
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub mod desktop;
 
 use anyhow::Result;
 use futures::{Sink, Stream};

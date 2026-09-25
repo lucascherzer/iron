@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use iroh::SecretKey;
-use iron::keys;
+use iron_core::keys;
 use std::fs;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -182,7 +182,7 @@ fn display_result(result: &VanityResult, elapsed: Duration, quiet: bool) -> Resu
         println!("  Base32:  {}", result.base32_id);
         println!("  Hex:     {}", hex::encode(result.endpoint_id.as_bytes()));
         println!("  Domain:  {}.iron", result.base32_id);
-        let ipv6 = iron::mapping::Registry::derive_ip(result.endpoint_id);
+        let ipv6 = iron_core::mapping::Registry::derive_ip(result.endpoint_id);
         println!("  IPv6:    {}", ipv6);
         println!();
         println!("Attempts:  {}", format_number(result.attempts));

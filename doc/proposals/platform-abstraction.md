@@ -3,6 +3,7 @@
 ## Status
 
 ✅ **Platform seam extracted** on `feat/platform-seam`  
+✅ **Workspace split** (`iron-core` / `iron-desktop` / `iron-cli`)  
 🚧 **Android backend and application: Future work**
 
 ## Motivation
@@ -27,17 +28,44 @@ The platform-independent engine now has four explicit boundaries:
 - `TunBackend` provisions a platform TUN device and returns `TunIo`, a raw
   packet stream and sink. `PacketRouter` consumes that I/O and does not create
   devices or run OS commands. The desktop implementation is
-  `platform::desktop::DesktopTun`.
+  `iron_desktop::DesktopTun`.
 - `StatePaths` supplies the persistent-state directory (the key file and
   known-peers cache). Desktop callers can use the OS default, while Android
   supplies the app data directory instead of relying on `$HOME`.
 - `DnsResolver::run(SocketAddr)` is the desktop UDP frontend. The
   `IronDnsHandler` resolution logic is portable and can be driven by a
   different frontend on platforms where loopback DNS cannot be configured.
-- `platform::desktop::dns_config` contains desktop system DNS integration:
+- `iron_desktop::dns_config` contains desktop system DNS integration:
   configuring resolver files or `systemd-resolved` to send `.iron` queries to
   the desktop UDP frontend. This is intentionally separate from DNS
   resolution itself.
+
+## Crate Split
+
+The seams alone are just a convention: nothing stops a later change from
+calling `ip route` or adding `#[cfg(target_os = "linux")]` inside the
+router, and a single crate would still compile on desktop. The workspace
+turns the convention into a build-time boundary:
+
+| Crate | Contents | May depend on OS? |
+|---|---|---|
+| `iron-core` | router, iroh protocol, DNS resolver, registry, keys, `StatePaths`, `NodeConfig`, the `platform` traits | **No** |
+| `iron-desktop` | `DesktopTun`, `dns_config`, `desktop_node_config()` | Yes (Linux/macOS) |
+| `iron-cli` | the `iron` binary, root checks, CLI commands | Yes |
+| `iron-android` (planned) | fd-backed `TunBackend`, DNS-over-TUN wiring, UniFFI bindings | Yes (Android) |
+
+`iron-core` cannot depend on the platform crates (they depend on it), and
+OS-bound dependencies such as `tun` and `nix` are simply not in its
+`Cargo.toml`. The `iron-core-android` flake check builds `iron-core` for
+`aarch64-linux-android` on every `nix flake check`, so anything that only
+works on desktop fails CI instead of surfacing months later during the
+Android port.
+
+**Rule:** when a feature needs OS behavior, add a trait to
+`iron_core::platform`, implement it per platform crate, and inject it via
+`NodeConfig`. If the Android check breaks, fix the layering; do not weaken
+or gate the check. The same rule is stated in `AGENTS.md` and in the
+`iron-core` crate docs so agents and contributors see it where they work.
 
 ## Android Plan
 
@@ -71,9 +99,14 @@ details are especially worth carrying over:
 
 ## Suggested Next Steps
 
-1. Split the workspace into `iron-core`, `iron-desktop`, `iron-android`, and
-   `iron-cli`.
-2. Add a CI cross-compilation check for `aarch64-linux-android`.
+1. Add the Android backend and application crate (future work).
+2. ✅ Add a cross-compilation check for `aarch64-linux-android`
+   (`nix build .#checks.<system>.iron-core-android`). Note that even without
+   linking this needs the NDK's C toolchain: ring compiles C in its build
+   script. The flake takes it from `pkgsCross.aarch64-android-prebuilt`.
 3. Implement DNS-over-TUN interception and upstream forwarding.
 4. Build the Android `cdylib` (using UniFFI) and Kotlin `VpnService`
    application.
+
+The portable seam is implemented in `crates/iron-core/src/platform.rs`; desktop
+implementations live in `crates/iron-desktop/src/`.

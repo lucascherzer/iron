@@ -93,7 +93,7 @@ fn convert_from_base32(base32: &str) -> Result<Formats> {
     let endpoint_id = EndpointId::from_bytes(&byte_array).context("Invalid EndpointId bytes")?;
 
     // Derive IPv6
-    let ipv6 = iron::mapping::Registry::derive_ip(endpoint_id);
+    let ipv6 = iron_core::mapping::Registry::derive_ip(endpoint_id);
 
     Ok(Formats {
         hex: hex::encode(endpoint_id.as_bytes()),
@@ -122,7 +122,7 @@ fn convert_from_hex(hex_str: &str) -> Result<Formats> {
         .to_lowercase();
 
     // Derive IPv6
-    let ipv6 = iron::mapping::Registry::derive_ip(endpoint_id);
+    let ipv6 = iron_core::mapping::Registry::derive_ip(endpoint_id);
 
     Ok(Formats {
         hex: hex_str.to_lowercase(),

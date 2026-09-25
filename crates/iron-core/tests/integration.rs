@@ -8,15 +8,15 @@
 //! - End-to-end packet flow (without actual network)
 
 use iroh::{EndpointId, SecretKey};
-use iron::dns::DnsResolver;
-use iron::mapping::Registry;
-use iron::router::PacketRouter;
+use iron_core::dns::DnsResolver;
+use iron_core::mapping::Registry;
+use iron_core::router::PacketRouter;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-use iron::test_utils::test_endpoint_id;
+use iron_core::test_utils::test_endpoint_id;
 
 /// Test that Registry provides consistent mappings across all components
 #[tokio::test]

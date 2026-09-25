@@ -34,7 +34,7 @@ impl Packet {
 
     /// Returns the raw bytes of the packet
     ///
-    /// For Raw packets, this returns the inner Vec<u8> directly.
+    /// For Raw packets, this returns the inner `Vec<u8>` directly.
     /// For future packet types, this may perform serialization.
     pub fn into_bytes(self) -> Vec<u8> {
         match self {

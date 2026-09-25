@@ -1795,12 +1795,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "iron"
+name = "iron-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "data-encoding",
+ "hex",
+ "hickory-proto 0.25.2",
+ "iroh",
+ "iron-core",
+ "iron-desktop",
+ "nix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "iron-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clap",
  "dashmap",
  "data-encoding",
  "etherparse",
@@ -1810,7 +1829,6 @@ dependencies = [
  "hickory-proto 0.25.2",
  "hickory-server",
  "iroh",
- "nix",
  "postcard",
  "rand 0.9.5",
  "serde",
@@ -1819,7 +1837,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "tracing-subscriber",
+]
+
+[[package]]
+name = "iron-desktop"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "iron-core",
+ "tokio",
+ "tracing",
  "tun",
 ]
 
