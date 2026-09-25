@@ -14,6 +14,19 @@
 - 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
 
+## Recent Updates (Sep 17, 2026)
+
+### ✅ Platform Seam Extraction - LANDED
+- Landed on `feat/platform-seam`, separating OS-specific concerns from the
+  portable packet and DNS logic.
+- Added `TunBackend`/`TunIo`, renamed the portable TUN engine to
+  `PacketRouter`, and moved desktop TUN provisioning and DNS system
+  configuration under `platform::desktop`.
+- Added injected `StatePaths` for persistent state and split the DNS UDP
+  frontend from the portable resolver logic.
+- Fixed the `--dns-port` bug: the configured port is now used instead of
+  always binding `127.0.0.1:5333`.
+
 ## Recent Updates (Jan 21, 2026)
 
 ### ✅ Packet Abstraction Refactor (Phase 1) - COMPLETE!

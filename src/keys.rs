@@ -1,34 +1,25 @@
 //! Cryptographic key management for iron
 //!
 //! Handles persistence and loading of the node's private key.
-//! Keys are stored in `~/.config/iron/secret.key` with 0600 permissions.
+//! The key file location comes from [`StatePaths`] (on desktop:
+//! `~/.config/iron/secret.key`) and is written with 0600 permissions.
 
+use crate::paths::StatePaths;
 use anyhow::{Context, Result};
 use iroh::SecretKey;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info};
 
-/// Default key storage directory
-const KEY_DIR: &str = ".config/iron";
-
-/// Key file name
-const KEY_FILE: &str = "secret.key";
-
-/// Get the path to the key storage directory
-fn key_dir_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME environment variable not set")?;
-    Ok(PathBuf::from(home).join(KEY_DIR))
-}
-
-/// Get the full path to the secret key file
+/// Get the full path to the secret key file, using the desktop default
+/// location.
+///
+/// CLI convenience only; components that receive a [`StatePaths`] should use
+/// [`StatePaths::key_file`] instead.
 pub fn key_path() -> PathBuf {
-    key_file_path().unwrap_or_else(|_| PathBuf::from("~/.config/iron/secret.key"))
-}
-
-/// Get the full path to the secret key file (internal, returns Result)
-fn key_file_path() -> Result<PathBuf> {
-    Ok(key_dir_path()?.join(KEY_FILE))
+    StatePaths::default_os()
+        .map(|paths| paths.key_file())
+        .unwrap_or_else(|_| PathBuf::from("~/.config/iron/secret.key"))
 }
 
 /// Load or generate a persistent secret key
@@ -46,8 +37,8 @@ fn key_file_path() -> Result<PathBuf> {
 /// # Returns
 ///
 /// Returns the loaded or newly generated SecretKey
-pub fn load_or_generate_key() -> Result<SecretKey> {
-    let key_path = key_file_path()?;
+pub fn load_or_generate_key(paths: &StatePaths) -> Result<SecretKey> {
+    let key_path = paths.key_file();
 
     if key_path.exists() {
         info!("Loading existing key from {}", key_path.display());
@@ -61,9 +52,14 @@ pub fn load_or_generate_key() -> Result<SecretKey> {
     }
 }
 
-/// Load a secret key from a file (public version without path)
+/// Load the secret key from the desktop default location.
+///
+/// CLI convenience only; components that receive a [`StatePaths`] should use
+/// [`load_or_generate_key`].
 pub fn load_key() -> Result<SecretKey> {
-    let key_path = key_file_path()?;
+    let key_path = StatePaths::default_os()
+        .context("cannot determine default key location")?
+        .key_file();
     load_key_from_path(&key_path)
 }
 
@@ -158,6 +154,20 @@ mod tests {
             loaded_key.to_bytes(),
             "Loaded key should match original"
         );
+    }
+
+    #[test]
+    fn test_load_or_generate_key_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = StatePaths::new(temp_dir.path());
+
+        // First call generates and persists
+        let generated = load_or_generate_key(&paths).unwrap();
+        assert!(paths.key_file().exists());
+
+        // Second call loads the same key
+        let loaded = load_or_generate_key(&paths).unwrap();
+        assert_eq!(generated.to_bytes(), loaded.to_bytes());
     }
 
     #[test]

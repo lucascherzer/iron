@@ -307,7 +307,7 @@ Limitations](doc/testing-limitations.md) for details.
 Per-module filtering:
 
 ```bash
-RUST_LOG=iron::dns=debug,iron::tun=trace,iron=info sudo iron serve
+RUST_LOG=iron::dns=debug,iron::router=trace,iron=info sudo iron serve
 ```
 
 ## Development

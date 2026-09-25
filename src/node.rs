@@ -1,21 +1,59 @@
 use crate::dns::DnsResolver;
 use crate::keys;
 use crate::mapping::Registry;
+use crate::paths::StatePaths;
+use crate::platform::TunBackend;
 use crate::protocol::IronProtocol;
-use crate::tun::TunInterface;
+use crate::router::PacketRouter;
 use anyhow::Result;
 use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+/// Platform-dependent pieces an [`IronNode`] is assembled from.
+///
+/// The node itself is platform-independent; everything OS-specific is
+/// injected here. Desktop callers use [`NodeConfig::desktop`], other
+/// platforms construct the fields explicitly.
+pub struct NodeConfig {
+    /// Where persistent state (secret key, known-peers cache) lives.
+    pub paths: StatePaths,
+    /// Address the UDP DNS frontend listens on.
+    pub dns_listen: SocketAddr,
+    /// Provisions the TUN device and exposes its packet I/O.
+    pub tun: Box<dyn TunBackend>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl NodeConfig {
+    /// Desktop defaults: state in `~/.config/iron`, DNS on `127.0.0.1:5333`,
+    /// self-provisioned TUN device.
+    pub fn desktop() -> Result<Self> {
+        Ok(Self {
+            paths: StatePaths::default_os()?,
+            dns_listen: SocketAddr::from(([127, 0, 0, 1], 5333)),
+            tun: Box::new(crate::platform::desktop::DesktopTun),
+        })
+    }
+
+    /// Same defaults with a different DNS port.
+    pub fn with_dns_port(mut self, port: u16) -> Self {
+        self.dns_listen.set_port(port);
+        self
+    }
+}
 
 pub struct IronNode {
     registry: Arc<Registry>,
     endpoint: Endpoint,
     dns: DnsResolver,
-    tun: TunInterface,
+    dns_listen: SocketAddr,
+    router: PacketRouter,
     protocol: IronProtocol,
+    tun: Box<dyn TunBackend>,
 }
 
 impl IronNode {
@@ -25,22 +63,31 @@ impl IronNode {
     /// - Registry for EndpointId <-> IPv6 mapping
     /// - Iroh endpoint for QUIC connections
     /// - DNS resolver for `.iron` domains
-    /// - TUN interface for packet interception
+    /// - Packet router bridging TUN packet I/O and the protocol handler
     /// - Protocol handler for packet transport
+    ///
+    /// The TUN device itself is provisioned by `config.tun` when
+    /// [`IronNode::start`] runs.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Iroh endpoint fails to bind
     /// - Any component initialization fails
-    pub async fn new() -> Result<Self> {
+    pub async fn new(config: NodeConfig) -> Result<Self> {
         info!("Initializing IronNode");
+
+        let NodeConfig {
+            paths,
+            dns_listen,
+            tun,
+        } = config;
 
         // Create shared registry
         let registry = Arc::new(Registry::new());
 
         // Load previously known peers to prevent issues with cached IPv6 addresses
-        match registry.load_peers() {
+        match registry.load_peers(&paths.known_peers_file()) {
             Ok(count) if count > 0 => info!("Loaded {} known peers from cache", count),
             Ok(_) => info!("No cached peers found, starting fresh"),
             Err(e) => warn!("Failed to load peers cache: {}", e),
@@ -48,7 +95,7 @@ impl IronNode {
 
         // Load or generate persistent secret key
         info!("Loading node identity");
-        let secret_key = keys::load_or_generate_key()?;
+        let secret_key = keys::load_or_generate_key(&paths)?;
 
         // Initialize iroh endpoint with persistent key
         info!("Creating iroh endpoint");
@@ -60,23 +107,23 @@ impl IronNode {
 
         info!("Iroh endpoint created: {}", endpoint.id());
 
-        // Get this node's derived IPv6 address
+        // Get this node's derived IPv6 address (populates the registry)
         let node_ipv6 = registry.get_or_assign_ip(endpoint.id());
         info!("Node IPv6 address: {}", node_ipv6);
 
         // Create channels for packet flow
-        // OS → Network: TUN sends packets to protocol handler
+        // OS → Network: packet router sends packets to protocol handler
         let (to_network_tx, to_network_rx) = mpsc::unbounded_channel();
-        // Network → OS: Protocol handler sends packets to TUN
+        // Network → OS: protocol handler sends packets to packet router
         let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();
 
         // Initialize DNS resolver
         info!("Creating DNS resolver");
         let dns = DnsResolver::new(registry.clone());
 
-        // Initialize TUN interface
-        info!("Creating TUN interface");
-        let tun = TunInterface::new(registry.clone(), node_ipv6, to_network_tx, from_network_rx);
+        // Initialize packet router
+        info!("Creating packet router");
+        let router = PacketRouter::new(registry.clone(), to_network_tx, from_network_rx);
 
         // Initialize protocol handler
         info!("Creating protocol handler");
@@ -93,8 +140,10 @@ impl IronNode {
             registry,
             endpoint,
             dns,
-            tun,
+            dns_listen,
+            router,
             protocol,
+            tun,
         })
     }
 
@@ -111,29 +160,40 @@ impl IronNode {
     /// Orchestrates the startup of all components.
     ///
     /// This starts:
-    /// 1. DNS resolver (listening on 127.0.0.1:5333)
-    /// 2. TUN interface (requires root/sudo)
-    /// 3. Protocol handler (iroh packet transport)
+    /// 1. The TUN device (provisioned by the platform backend; on desktop
+    ///    this requires root/sudo)
+    /// 2. DNS resolver (listening on the configured address)
+    /// 3. Packet router (bridging TUN packet I/O and iroh)
+    /// 4. Protocol handler (iroh packet transport)
     ///
     /// All components run concurrently. If any component fails, all are shut down.
     ///
     /// # Errors
     ///
-    /// Returns an error if any component fails to start or encounters a fatal error.
+    /// Returns an error if the TUN device cannot be provisioned, or if any
+    /// component encounters a fatal error.
     pub async fn start(self) -> Result<()> {
         info!("Starting IronNode (ID: {})", self.endpoint_id());
 
+        // Provision the TUN device first: without it there is no data plane,
+        // so failing fast beats running a node that cannot carry traffic.
+        let node_ipv6 = self.registry.get_or_assign_ip(self.endpoint.id());
+        let tun_io = self.tun.open(node_ipv6)?;
+
         // Start DNS resolver
+        let dns = self.dns;
+        let dns_listen = self.dns_listen;
         let dns_handle = tokio::spawn(async move {
-            if let Err(e) = self.dns.run("127.0.0.1:5333").await {
+            if let Err(e) = dns.run(dns_listen).await {
                 error!("DNS resolver failed: {}", e);
             }
         });
 
-        // Start TUN interface
-        let tun_handle = tokio::spawn(async move {
-            if let Err(e) = self.tun.run().await {
-                error!("TUN interface failed: {}", e);
+        // Start packet router
+        let router = self.router;
+        let router_handle = tokio::spawn(async move {
+            if let Err(e) = router.run(tun_io).await {
+                error!("Packet router failed: {}", e);
             }
         });
 
@@ -143,10 +203,10 @@ impl IronNode {
         // If protocol handler exits, stop other components
         info!("Protocol handler exited, shutting down other components");
         dns_handle.abort();
-        tun_handle.abort();
+        router_handle.abort();
 
         let _ = dns_handle.await;
-        let _ = tun_handle.await;
+        let _ = router_handle.await;
 
         info!("IronNode shutdown complete");
         protocol_result

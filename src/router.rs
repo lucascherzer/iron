@@ -1,16 +1,19 @@
 use crate::mapping::Registry;
 use crate::packet::Packet;
+use crate::platform::TunIo;
 use anyhow::{Context, Result};
 use etherparse::{Ipv6Header, TcpHeader};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use iroh::EndpointId;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
-use tun::{AsyncDevice, Configuration, Layer};
 
-/// TUN interface for bidirectional packet routing
+/// Routes raw IP packets between the OS network stack and the iroh network.
+///
+/// The router is platform-independent: it operates on a [`TunIo`] (raw packet
+/// stream/sink) produced by a [`crate::platform::TunBackend`], and never
+/// touches the TUN device itself.
 ///
 /// **Packet Flow:**
 ///
@@ -27,10 +30,8 @@ use tun::{AsyncDevice, Configuration, Layer};
 /// 3. Send Packet via `from_network_rx`
 /// 4. We write packet to TUN device
 /// 5. OS routes to listening application
-pub struct TunInterface {
+pub struct PacketRouter {
     registry: Arc<Registry>,
-    /// This node's derived IPv6 address (used for TUN configuration)
-    node_ipv6: Ipv6Addr,
     /// Channel for sending packets TO network (OS → iroh)
     /// Format: (destination_endpoint_id, Packet)
     to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
@@ -39,276 +40,27 @@ pub struct TunInterface {
     from_network_rx: mpsc::UnboundedReceiver<Packet>,
 }
 
-impl TunInterface {
-    /// Creates a new TUN interface
+impl PacketRouter {
+    /// Creates a new packet router
     ///
     /// # Arguments
     ///
     /// * `registry` - Shared registry for IPv6 <-> EndpointId mapping
-    /// * `node_ipv6` - This node's derived IPv6 address
     /// * `to_network_tx` - Channel sender for Packets going to iroh peers
     /// * `from_network_rx` - Channel receiver for Packets coming from iroh peers
     pub fn new(
         registry: Arc<Registry>,
-        node_ipv6: Ipv6Addr,
         to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
         from_network_rx: mpsc::UnboundedReceiver<Packet>,
     ) -> Self {
-        info!("Creating TUN interface with IPv6: {}", node_ipv6);
         Self {
             registry,
-            node_ipv6,
             to_network_tx,
             from_network_rx,
         }
     }
 
-    /// Creates and configures the TUN device
-    ///
-    /// # Platform Notes
-    ///
-    /// - macOS: Creates a `utun` device (requires root/sudo)
-    /// - Linux: Creates a `tun` device (requires root/sudo)
-    ///
-    /// # Configuration
-    ///
-    /// - IPv6 only (Layer3)
-    /// - Address: Node's derived IPv6 with /32 prefix
-    /// - MTU: 1420 bytes (accounts for QUIC overhead)
-    fn create_device(&self) -> Result<AsyncDevice> {
-        info!("Creating TUN device (requires root/sudo)");
-        let mut config = Configuration::default();
-
-        // Configure IPv6-only TUN device (Layer 3)
-        // Note: IPv4 addresses are required by tun crate but ignored for IPv6 traffic
-        // The actual IPv6 configuration happens in configure_ipv6()
-        config
-            .layer(Layer::L3)
-            .address((169, 254, 0, 1))
-            .netmask((255, 255, 255, 0))
-            .destination((169, 254, 0, 2))
-            .mtu(1420)
-            .up();
-
-        #[cfg(target_os = "linux")]
-        config.platform_config(|platform_config| {
-            platform_config.ensure_root_privileges(true);
-        });
-
-        debug!("TUN configuration: {:?}", config);
-
-        let device = match tun::create_as_async(&config) {
-            Ok(dev) => {
-                debug!("TUN device creation successful");
-                dev
-            }
-            Err(e) => {
-                error!("TUN device creation failed: {:?}", e);
-                error!("Error kind: {}", e);
-                error!("Configuration was: {:?}", config);
-                anyhow::bail!("Failed to create TUN device: {} (are you root?)", e);
-            }
-        };
-
-        let tun_name = match device.as_ref().tun_name() {
-            Ok(name) => name,
-            Err(e) => {
-                error!("Failed to get TUN device name: {:?}", e);
-                anyhow::bail!("Failed to get TUN device name: {}", e);
-            }
-        };
-        info!("TUN device created: {}", tun_name);
-
-        // Disable IPv4 on the interface (we only use IPv6)
-        match self.disable_ipv4(&tun_name) {
-            Ok(_) => debug!("IPv4 disabled on interface"),
-            Err(e) => {
-                warn!("Failed to disable IPv4 (non-critical): {}", e);
-                // Continue anyway - this is not critical
-            }
-        }
-
-        // Configure IPv6 address on the interface
-        match self.configure_ipv6(&tun_name) {
-            Ok(_) => debug!("IPv6 configuration successful"),
-            Err(e) => {
-                error!("IPv6 configuration failed: {:?}", e);
-                return Err(e);
-            }
-        }
-
-        Ok(device)
-    }
-
-    /// Disables IPv4 on the TUN interface
-    ///
-    /// This ensures the interface only handles IPv6 traffic, preventing
-    /// the OS from sending any IPv4 packets to the TUN device.
-    fn disable_ipv4(&self, tun_name: &str) -> Result<()> {
-        info!("Disabling IPv4 on {}", tun_name);
-
-        #[cfg(target_os = "macos")]
-        {
-            // Remove the IPv4 address configuration
-            // Format: ifconfig <interface> inet <address> delete
-            let output = std::process::Command::new("ifconfig")
-                .arg(tun_name)
-                .arg("inet")
-                .arg("169.254.0.1")
-                .arg("delete")
-                .output()
-                .context("Failed to execute ifconfig")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // Might not exist, that's okay
-                debug!("IPv4 removal returned: {}", stderr);
-            } else {
-                info!("IPv4 address removed from {}", tun_name);
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Remove all IPv4 addresses
-            let output = std::process::Command::new("ip")
-                .arg("-4")
-                .arg("addr")
-                .arg("flush")
-                .arg("dev")
-                .arg(tun_name)
-                .output()
-                .context("Failed to execute ip command")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug!("IPv4 flush returned: {}", stderr);
-            }
-
-            info!("IPv4 disabled on {}", tun_name);
-        }
-
-        Ok(())
-    }
-
-    /// Configures IPv6 address and routing on the TUN interface
-    ///
-    /// Uses system commands to add IPv6 address and route since the tun crate
-    /// doesn't handle IPv6 configuration automatically on all platforms.
-    ///
-    /// Sets up:
-    /// - Interface IPv6 address: Node's derived IPv6 with /32 prefix
-    /// - Route: fd69:726f::/32 → TUN interface
-    fn configure_ipv6(&self, tun_name: &str) -> Result<()> {
-        info!(
-            "Configuring IPv6 on {} with address {}",
-            tun_name, self.node_ipv6
-        );
-
-        #[cfg(target_os = "macos")]
-        {
-            // Add IPv6 address with /32 prefix
-            let ipv6_with_prefix = format!("{}/32", self.node_ipv6);
-            let output = std::process::Command::new("ifconfig")
-                .arg(tun_name)
-                .arg("inet6")
-                .arg(&ipv6_with_prefix)
-                .arg("up")
-                .output()
-                .context("Failed to execute ifconfig")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("Failed to configure IPv6 address: {}", stderr);
-            }
-
-            info!(
-                "IPv6 address configured: {} on {}",
-                ipv6_with_prefix, tun_name
-            );
-
-            // Add route for the entire fd69:726f::/32 network
-            let output = std::process::Command::new("route")
-                .arg("-n")
-                .arg("add")
-                .arg("-inet6")
-                .arg("fd69:726f::/32")
-                .arg("-interface")
-                .arg(tun_name)
-                .output()
-                .context("Failed to execute route command")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // Route might already exist, just warn
-                warn!("Failed to add route (might already exist): {}", stderr);
-            } else {
-                info!("IPv6 route added: fd69:726f::/32 → {}", tun_name);
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Add IPv6 address with /32 prefix
-            let ipv6_with_prefix = format!("{}/32", self.node_ipv6);
-            let output = std::process::Command::new("ip")
-                .arg("-6")
-                .arg("addr")
-                .arg("add")
-                .arg(&ipv6_with_prefix)
-                .arg("dev")
-                .arg(tun_name)
-                .output()
-                .context("Failed to execute ip command")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("Failed to configure IPv6 address: {}", stderr);
-            }
-
-            info!(
-                "IPv6 address configured: {} on {}",
-                ipv6_with_prefix, tun_name
-            );
-
-            // Bring the interface up
-            let output = std::process::Command::new("ip")
-                .arg("link")
-                .arg("set")
-                .arg(tun_name)
-                .arg("up")
-                .output()
-                .context("Failed to bring interface up")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to bring interface up: {}", stderr);
-            }
-
-            // Add route for the entire fd69:726f::/32 network
-            let output = std::process::Command::new("ip")
-                .arg("-6")
-                .arg("route")
-                .arg("add")
-                .arg("fd69:726f::/32")
-                .arg("dev")
-                .arg(tun_name)
-                .output()
-                .context("Failed to add route")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // Route might already exist, just warn
-                warn!("Failed to add route (might already exist): {}", stderr);
-            } else {
-                info!("IPv6 route added: fd69:726f::/32 → {}", tun_name);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Initializes the TUN device and starts the packet processing loop.
+    /// Runs the packet processing loop on the given TUN packet I/O.
     ///
     /// This is the main event loop that handles bidirectional packet flow:
     /// - **OS → Network**: Read from TUN, lookup EndpointId, send to iroh
@@ -317,19 +69,20 @@ impl TunInterface {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - TUN device creation fails (likely permission issue)
     /// - Packet parsing fails repeatedly
     /// - Device I/O errors occur
-    pub async fn run(mut self) -> Result<()> {
-        let device = self.create_device()?;
-        let mut framed = device.into_framed();
+    pub async fn run(mut self, io: TunIo) -> Result<()> {
+        let TunIo {
+            mut incoming,
+            mut outgoing,
+        } = io;
 
-        info!("TUN interface running, ready to process packets");
+        info!("Packet router running, ready to process packets");
 
         loop {
             tokio::select! {
                 // OS → Network: Read packet from TUN, send to iroh
-                Some(packet) = framed.next() => {
+                Some(packet) = incoming.next() => {
                     let packet = packet.context("Failed to read packet from TUN")?;
                     trace!("Received packet from OS ({} bytes)", packet.len());
                     if let Err(e) = self.handle_os_to_network(&packet).await {
@@ -347,10 +100,9 @@ impl TunInterface {
                             trace!("Failed to inspect packet: {}", e);
                         }
 
-                    use futures::SinkExt;
                     // Extract raw bytes from Packet
                     let packet_bytes = packet.into_bytes();
-                    if let Err(e) = framed.send(packet_bytes).await {
+                    if let Err(e) = outgoing.send(packet_bytes).await {
                         error!("Failed to write packet to TUN: {}", e);
                     } else {
                         debug!("Successfully wrote packet to TUN");
@@ -487,13 +239,11 @@ mod tests {
     use crate::test_utils::test_endpoint_id;
 
     #[test]
-    fn test_tun_interface_new() {
+    fn test_packet_router_new() {
         let registry = Arc::new(Registry::new());
-        let endpoint_id = test_endpoint_id(1);
-        let node_ipv6 = registry.get_or_assign_ip(endpoint_id);
         let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let _tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
+        let _router = PacketRouter::new(registry, to_network_tx, from_network_rx);
         // Just verify it constructs
     }
 
@@ -505,17 +255,9 @@ mod tests {
         // Get the IPv6 for this endpoint
         let dest_ip = registry.get_or_assign_ip(endpoint_id);
 
-        let node_endpoint_id = test_endpoint_id(1);
-        let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
-
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let tun = TunInterface::new(
-            Arc::clone(&registry),
-            node_ipv6,
-            to_network_tx,
-            from_network_rx,
-        );
+        let router = PacketRouter::new(Arc::clone(&registry), to_network_tx, from_network_rx);
 
         // Create a minimal IPv6 packet
         // IPv6 header: 40 bytes
@@ -544,7 +286,7 @@ mod tests {
         packet[24..40].copy_from_slice(&dest_ip.octets());
 
         // Handle the packet (OS → Network)
-        let result = tun.handle_os_to_network(&packet).await;
+        let result = router.handle_os_to_network(&packet).await;
         assert!(result.is_ok());
 
         // Verify packet was sent to network channel
@@ -558,11 +300,9 @@ mod tests {
     #[tokio::test]
     async fn test_handle_os_to_network_unknown_destination() {
         let registry = Arc::new(Registry::new());
-        let node_endpoint_id = test_endpoint_id(1);
-        let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
+        let router = PacketRouter::new(registry, to_network_tx, from_network_rx);
 
         // Create IPv6 packet with unknown destination
         let mut packet = vec![0u8; 40];
@@ -583,7 +323,7 @@ mod tests {
         ]);
 
         // Should handle gracefully (log warning but not error)
-        let result = tun.handle_os_to_network(&packet).await;
+        let result = router.handle_os_to_network(&packet).await;
         assert!(result.is_ok());
 
         // Verify packet was NOT sent to network channel
@@ -594,21 +334,71 @@ mod tests {
     #[tokio::test]
     async fn test_handle_os_to_network_invalid_packet() {
         let registry = Arc::new(Registry::new());
-        let node_endpoint_id = test_endpoint_id(1);
-        let node_ipv6 = registry.get_or_assign_ip(node_endpoint_id);
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let tun = TunInterface::new(registry, node_ipv6, to_network_tx, from_network_rx);
+        let router = PacketRouter::new(registry, to_network_tx, from_network_rx);
 
         // Invalid packet (too short, version 0)
         let packet = vec![0u8; 10];
 
         // Should handle gracefully (non-IPv6 packets are filtered out)
-        let result = tun.handle_os_to_network(&packet).await;
+        let result = router.handle_os_to_network(&packet).await;
         assert!(result.is_ok());
 
         // Verify packet was NOT sent to network channel
         let received = to_network_rx.try_recv();
         assert!(received.is_err()); // Should be empty
+    }
+
+    /// The router loop must move packets from a TunIo stream into the
+    /// to-network channel and from the from-network channel into the TunIo
+    /// sink, without a real TUN device.
+    #[tokio::test]
+    async fn test_run_routes_packets_through_tun_io() {
+        let registry = Arc::new(Registry::new());
+        let endpoint_id = test_endpoint_id(7);
+        let dest_ip = registry.get_or_assign_ip(endpoint_id);
+
+        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let router = PacketRouter::new(Arc::clone(&registry), to_network_tx, from_network_rx);
+
+        // Fake TUN: incoming packets from a channel, outgoing packets into a channel
+        let (os_tx, os_rx) = mpsc::unbounded_channel::<std::io::Result<Vec<u8>>>();
+        let (tun_written_tx, mut tun_written_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        let incoming = Box::pin(futures::stream::unfold(os_rx, |mut rx| async move {
+            rx.recv().await.map(|packet| (packet, rx))
+        }));
+        let outgoing = Box::pin(futures::sink::unfold(
+            tun_written_tx,
+            |tx, packet: Vec<u8>| async move {
+                tx.send(packet).unwrap();
+                Ok::<_, std::io::Error>(tx)
+            },
+        ));
+
+        let io = TunIo { incoming, outgoing };
+        let handle = tokio::spawn(router.run(io));
+
+        // OS → Network
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x60;
+        packet[6] = 59;
+        packet[7] = 64;
+        packet[24..40].copy_from_slice(&dest_ip.octets());
+        os_tx.send(Ok(packet.clone())).unwrap();
+
+        let (recv_endpoint_id, recv_packet) = to_network_rx.recv().await.unwrap();
+        assert_eq!(recv_endpoint_id, endpoint_id);
+        assert_eq!(recv_packet.as_bytes(), Some(packet.as_slice()));
+
+        // Network → OS
+        let inbound = Packet::raw(packet.clone());
+        from_network_tx.send(inbound).unwrap();
+        let written = tun_written_rx.recv().await.unwrap();
+        assert_eq!(written, packet);
+
+        handle.abort();
     }
 }

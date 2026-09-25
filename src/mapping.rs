@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use iroh::EndpointId;
 use std::net::Ipv6Addr;
-use std::path::PathBuf;
+use std::path::Path;
 use tracing::{debug, trace, warn};
 
 /// Manages the bi-directional mapping between Iroh EndpointIds and IPv6 addresses.
@@ -116,19 +116,6 @@ impl Registry {
         )
     }
 
-    /// Returns the path to the known peers file
-    ///
-    /// Stored in ~/.config/iron for persistence across restarts
-    fn known_peers_path() -> Result<PathBuf, std::io::Error> {
-        let home = std::env::var("HOME").map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "HOME environment variable not set",
-            )
-        })?;
-        Ok(PathBuf::from(home).join(".config/iron/known_peers.json"))
-    }
-
     /// Saves known peer EndpointIds to disk for persistence across restarts
     ///
     /// This prevents the issue where applications cache IPv6 addresses but iron
@@ -149,14 +136,16 @@ impl Registry {
     ///
     /// # Security
     ///
-    /// - File is stored in ~/.config/iron with 0600 permissions
+    /// - File is written with 0600 permissions
     /// - Only saves EndpointIds that were legitimately discovered (via DNS or incoming connections)
     /// - Never "guesses" EndpointIds - only remembers verified peers
-    pub fn save_peers(&self) -> Result<(), std::io::Error> {
+    ///
+    /// The location comes from the caller (see
+    /// [`crate::paths::StatePaths::known_peers_file`]) so that platforms
+    /// without a `$HOME` can store state where the OS wants it.
+    pub fn save_peers(&self, peers_path: &Path) -> Result<(), std::io::Error> {
         use std::fs;
         use std::io::Write;
-
-        let peers_path = Self::known_peers_path()?;
 
         // Ensure directory exists
         if let Some(parent) = peers_path.parent() {
@@ -194,7 +183,7 @@ impl Registry {
 
         file.write_all(json.as_bytes())?;
         file.sync_all()?;
-        fs::rename(temp_path, &peers_path)?;
+        fs::rename(temp_path, peers_path)?;
 
         debug!("Saved {} known peers to {:?}", peers.len(), peers_path);
         Ok(())
@@ -207,10 +196,8 @@ impl Registry {
     ///
     /// For each EndpointId, derives the corresponding IPv6 address and
     /// populates the registry mappings.
-    pub fn load_peers(&self) -> Result<usize, std::io::Error> {
+    pub fn load_peers(&self, peers_path: &Path) -> Result<usize, std::io::Error> {
         use std::fs;
-
-        let peers_path = Self::known_peers_path()?;
 
         // If file doesn't exist, that's okay - just starting fresh
         if !peers_path.exists() {
@@ -218,7 +205,7 @@ impl Registry {
             return Ok(0);
         }
 
-        let contents = fs::read_to_string(&peers_path)?;
+        let contents = fs::read_to_string(peers_path)?;
 
         // Deserialize from JSON (array of base32-encoded EndpointIds)
         let peer_ids: Vec<String> = serde_json::from_str(&contents)
@@ -586,5 +573,36 @@ mod tests {
         let ip = registry.get_or_assign_ip(endpoint_id);
         let found = registry.get_endpoint_id(&ip);
         assert_eq!(found, Some(endpoint_id));
+    }
+
+    #[test]
+    fn test_save_and_load_peers_roundtrip() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let peers_path = temp_dir.path().join("known_peers.json");
+
+        let registry = Registry::new();
+        let endpoint_a = test_endpoint_id(1);
+        let endpoint_b = test_endpoint_id(2);
+        let ip_a = registry.get_or_assign_ip(endpoint_a);
+        let ip_b = registry.get_or_assign_ip(endpoint_b);
+
+        registry.save_peers(&peers_path).unwrap();
+
+        // A fresh registry restores the same mappings from the file
+        let restored = Registry::new();
+        let loaded = restored.load_peers(&peers_path).unwrap();
+        assert_eq!(loaded, 2);
+        assert_eq!(restored.get_endpoint_id(&ip_a), Some(endpoint_a));
+        assert_eq!(restored.get_endpoint_id(&ip_b), Some(endpoint_b));
+    }
+
+    #[test]
+    fn test_load_peers_missing_file_is_empty() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let registry = Registry::new();
+        let loaded = registry
+            .load_peers(&temp_dir.path().join("nonexistent.json"))
+            .unwrap();
+        assert_eq!(loaded, 0);
     }
 }

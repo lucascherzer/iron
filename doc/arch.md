@@ -28,28 +28,30 @@ We require the following components for this to work:
   in the Unique Local Address (ULA) space. The mapping is deterministic based on
   the EndpointId to ensure consistency. For close integration with existing software,
   it needs to be able to resolve `.iron` DNS queries.
-2. A tun interface that facilitates communication to the outside network,
+2. A platform TUN backend that facilitates communication to the outside network,
   advertising to route addresses within the ULA address spaces. It uses the
   resolver in reverse, taking the IPv6 address and getting its associated iroh
   EndpointId. And sending the data off.
 3. A key management system that persists the node's private key across restarts,
-  ensuring consistent EndpointId (stored in `~/.config/iron/secret.key`).
+  ensuring consistent EndpointId (using the injected `StatePaths`).
 4. A DNS auto-configuration system that sets up system-level DNS resolution for
-  `.iron` domains on supported platforms (macOS, Linux with systemd-resolved).
+  `.iron` domains on supported desktop platforms
+  (`platform::desktop::dns_config`).
 5. A CLI interface providing utilities for node management, key operations, and
   format conversions.
 
 # Packet Flow Architecture
 
 ## Overview
-The TUN interface handles **bidirectional** packet flow between the OS and the iron network:
+The platform TUN backend supplies **bidirectional** packet flow between the OS
+and the portable `PacketRouter`:
 
 ### OS → Network (Outbound to Peers)
 When an OS application wants to communicate with a peer:
 
 1. **Application sends data** to destination IPv6 `fd69:726f::xxxx:xxxx:xxxx:xxxx`
 2. **OS routes packet to TUN device** (because we advertise routes for `fd69:726f::/32`)
-3. **TUN reads packet from device**
+3. **TunIo reads packet from device**
 4. **Parse IPv6 header** to extract destination address
 5. **Registry lookup**: Destination IPv6 → EndpointId
 6. **Send to iroh** via channel: `(EndpointId, packet_bytes)`
@@ -61,16 +63,16 @@ When a peer sends data to us:
 1. **Iroh receives packet** from peer (iroh knows sender's EndpointId)
 2. **Registry lookup**: Sender EndpointId → Source IPv6
 3. **Packet already has correct headers** (peer constructed it properly)
-4. **Send to TUN** via channel: `packet_bytes`
-5. **TUN writes packet to device**
+4. **Send to PacketRouter** via channel: `packet_bytes`
+5. **TunIo writes packet to device**
 6. **OS routes to listening application** based on destination IPv6
 
 ## Key Insight
 **We do NOT read from network hardware** - instead, we actively poll iroh's bidirectional
 endpoint for incoming packets. Iroh handles all the network complexity (NAT traversal,
 relay coordination, QUIC connections). We simply:
-- Read packets FROM the TUN device (OS wants to send)
-- Write packets TO the TUN device (peer sent to us)
+- Read packets FROM `TunIo` (OS wants to send)
+- Write packets TO `TunIo` (peer sent to us)
 
 ## Channel Architecture
 ```rust
@@ -80,8 +82,8 @@ let (to_network_tx, to_network_rx) = mpsc::unbounded_channel::<(EndpointId, Vec<
 // Network → OS  
 let (from_network_tx, from_network_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-// TUN interface
-TunInterface::new(registry, to_network_tx, from_network_rx);
+// Portable packet router; platform code supplies TunIo when it runs.
+PacketRouter::new(registry, to_network_tx, from_network_rx);
 
 // Iroh integration (Phase 5)
 IronProtocol::new(registry, to_network_rx, from_network_tx);
@@ -123,7 +125,7 @@ IPv6: fd69:726f:0000:0000:xxxx:xxxx:xxxx:xxxx
 
 **Rationale**:
 - Simpler architecture for MVP
-- Shared `Arc<Registry>` between DNS and TUN components
+- Shared `Arc<Registry>` between DNS and packet-router components
 - No IPC overhead
 - Easier debugging and state management
 - Can migrate to multi-process later if needed
@@ -131,7 +133,7 @@ IPv6: fd69:726f:0000:0000:xxxx:xxxx:xxxx:xxxx
 **Task Structure**:
 - Main task: Orchestration and lifecycle management
 - DNS task: Hickory-server DNS resolver
-- TUN task: Packet processing loop
+- Packet-router task: Packet processing loop
 - Iroh task: Connection management (integrated into IronNode)
 
 ## Platform Support
@@ -144,23 +146,22 @@ IPv6: fd69:726f:0000:0000:xxxx:xxxx:xxxx:xxxx
 - Windows support as tertiary target
 - Architecture allows platform-specific optimizations via conditional compilation
 
-## TUN Interface Architecture
+The platform layer keeps OS concerns out of the portable engine. `TunBackend`
+provisions a device and returns raw packet I/O as `TunIo`; `PacketRouter`
+handles packets without knowing whether that I/O came from a desktop TUN
+device or a file descriptor supplied by a future Android `VpnService`.
+`StatePaths` injects persistent storage, and desktop DNS system configuration
+lives in `platform::desktop::dns_config`, separate from the portable
+`IronDnsHandler` resolution logic.
+
+## Packet Router Architecture
 **MVP Approach**: Single-threaded async loop
 
 **Implementation**:
 ```rust
-pub async fn run(&self) -> Result<()> {
-    let dev = tun::create_as_async(&config)?;
-    let mut framed = dev.into_framed();
-    
-    loop {
-        tokio::select! {
-            Some(packet) = framed.next() => {
-                self.handle_packet(packet?).await?;
-            }
-        }
-    }
-}
+let tun_io = backend.open(node_ipv6)?;
+// PacketRouter consumes raw I/O supplied by a TunBackend.
+router.run(tun_io).await?;
 ```
 
 **Future Optimization Path**: Pipeline architecture (reader → processor pool → writer)
@@ -190,7 +191,7 @@ pub async fn run(&self) -> Result<()> {
 - Prevents source address spoofing by trusting iroh's crypto instead of packet headers
 
 **Key Persistence**:
-- Private keys stored in `~/.config/iron/secret.key` (0600 permissions)
+- Private keys stored below the injected `StatePaths` directory (0600 permissions)
 - Automatically generated on first run
 - Ensures consistent EndpointId across restarts
 - Ownership auto-fixed when run with sudo (prevents root-owned files in user directory)

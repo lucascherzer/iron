@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use iron::IronNode;
-use iron::dns_config;
+use iron::platform::desktop::dns_config;
+use iron::{IronNode, NodeConfig};
 use tracing::{error, info};
 
 mod commands;
@@ -289,9 +289,11 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
     // Setup DNS configuration automatically
     setup_dns_for_daemon()?;
 
-    // Initialize and start iron node
+    // Initialize and start iron node with desktop platform defaults
     info!("Initializing iron node...");
-    let node = IronNode::new().await?;
+    let config = NodeConfig::desktop()?.with_dns_port(dns_port);
+    let state_paths = config.paths.clone();
+    let node = IronNode::new(config).await?;
 
     // Get a reference to the registry for saving on shutdown
     let registry = node.registry().clone();
@@ -372,7 +374,7 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
 
     // Save known peers for next startup
     info!("Saving known peers...");
-    if let Err(e) = registry.save_peers() {
+    if let Err(e) = registry.save_peers(&state_paths.known_peers_file()) {
         error!("Failed to save peers cache: {}", e);
     } else {
         info!("✓ Peers cache saved");

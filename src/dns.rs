@@ -7,7 +7,7 @@ use hickory_server::ServerFuture;
 use hickory_server::authority::MessageResponseBuilder;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use iroh::EndpointId;
-use std::net::Ipv6Addr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, info, trace, warn};
@@ -28,14 +28,21 @@ impl DnsResolver {
 
     /// Starts the DNS server listening on the specified address.
     ///
+    /// This UDP frontend is how `.iron` queries reach the resolver on
+    /// desktop, where the OS is configured to send them to a loopback
+    /// socket (see `platform::desktop::dns_config`). Other platforms may
+    /// deliver queries differently (e.g. Android intercepts DNS packets
+    /// arriving over the TUN device); the resolution logic in
+    /// [`IronDnsHandler`] is shared either way.
+    ///
     /// # Arguments
     ///
-    /// * `listen_addr` - Address to bind to (e.g., "127.0.0.1:5333")
+    /// * `listen_addr` - Address to bind to (e.g., `127.0.0.1:5333`)
     ///
     /// # Returns
     ///
     /// Returns Ok(()) on successful shutdown, or an error if the server fails to start
-    pub async fn run(&self, listen_addr: &str) -> Result<()> {
+    pub async fn run(&self, listen_addr: SocketAddr) -> Result<()> {
         let handler = IronDnsHandler::new(Arc::clone(&self.registry));
         let mut server = ServerFuture::new(handler);
 
