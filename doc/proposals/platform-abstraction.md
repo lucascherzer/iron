@@ -30,11 +30,12 @@ The platform-independent engine now has four explicit boundaries:
   devices or run OS commands. The desktop implementation is
   `iron_desktop::DesktopTun`.
 - `StatePaths` supplies the persistent-state directory (the key file and
-  known-peers cache). Desktop callers can use the OS default, while Android
-  supplies the app data directory instead of relying on `$HOME`.
-- `DnsResolver::run(SocketAddr)` is the desktop UDP frontend. The
-  `IronDnsHandler` resolution logic is portable and can be driven by a
-  different frontend on platforms where loopback DNS cannot be configured.
+  known-peers cache). The platform crate chooses it: desktop uses
+  `iron_desktop::default_state_paths()` (`$HOME/.config/iron`), Android will
+  supply the app data directory.
+- `DnsResolver::resolve` is message-level (bytes in, bytes out). It is driven
+  by `serve_udp` (desktop loopback socket) and by `PacketRouter`, which
+  answers queries sent over the TUN to `MAGIC_DNS_ADDR`.
 - `iron_desktop::dns_config` contains desktop system DNS integration:
   configuring resolver files or `systemd-resolved` to send `.iron` queries to
   the desktop UDP frontend. This is intentionally separate from DNS

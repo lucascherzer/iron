@@ -1,6 +1,6 @@
+use super::key_path;
 use anyhow::{Result, anyhow};
 use iroh::SecretKey;
-use iron_core::keys;
 use std::fs;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -227,7 +227,7 @@ fn handle_save(
                 println!("✓ Key saved to: {}", output_path);
             }
         } else {
-            let key_path = keys::key_path();
+            let key_path = key_path()?;
 
             if key_path.exists() && !quiet {
                 print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");

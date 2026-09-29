@@ -34,25 +34,55 @@ pub fn detect_platform() -> Platform {
     }
 }
 
-/// Check if DNS is already configured for .iron domains
-pub fn is_dns_configured() -> bool {
-    match detect_platform() {
-        Platform::MacOS => Path::new("/etc/resolver/iron").exists(),
-        Platform::LinuxSystemd => Path::new("/etc/systemd/resolved.conf.d/iron.conf").exists(),
-        Platform::LinuxOther => false, // Can't auto-detect for other systems
-    }
+const MACOS_RESOLVER_FILE: &str = "/etc/resolver/iron";
+const SYSTEMD_RESOLVER_FILE: &str = "/etc/systemd/resolved.conf.d/iron.conf";
+
+/// macOS `/etc/resolver/iron` contents sending `.iron` to `127.0.0.1:port`.
+fn macos_config(port: u16) -> String {
+    format!(
+        "# iron DNS resolver - routes .iron domains to iron's DNS server
+# Created by iron
+nameserver 127.0.0.1
+port {port}
+"
+    )
+}
+
+/// systemd-resolved drop-in sending `.iron` to `127.0.0.1:port`.
+fn systemd_config(port: u16) -> String {
+    format!(
+        "# iron DNS resolver - routes .iron domains to iron's DNS server
+# Created by iron
+[Resolve]
+DNS=127.0.0.1:{port}
+Domains=~iron
+"
+    )
+}
+
+/// True if the OS already sends `.iron` queries to `127.0.0.1:port`.
+///
+/// Compares file contents, not just existence, so a config left over from a
+/// run with a different `--dns-port` is rewritten.
+pub fn is_dns_configured(port: u16) -> bool {
+    let (path, expected) = match detect_platform() {
+        Platform::MacOS => (MACOS_RESOLVER_FILE, macos_config(port)),
+        Platform::LinuxSystemd => (SYSTEMD_RESOLVER_FILE, systemd_config(port)),
+        Platform::LinuxOther => return false, // Can't auto-detect for other systems
+    };
+    std::fs::read_to_string(path).is_ok_and(|current| current == expected)
 }
 
 /// Setup DNS configuration for .iron domains
 ///
 /// This configures the system to route only .iron domains to iron's DNS server,
 /// leaving all other DNS resolution unchanged.
-pub fn setup_dns() -> Result<()> {
+pub fn setup_dns(port: u16) -> Result<()> {
     info!("Setting up DNS configuration for .iron domains");
 
     match detect_platform() {
-        Platform::MacOS => setup_dns_macos(),
-        Platform::LinuxSystemd => setup_dns_linux_systemd(),
+        Platform::MacOS => setup_dns_macos(port),
+        Platform::LinuxSystemd => setup_dns_linux_systemd(port),
         Platform::LinuxOther => {
             warn!("Automatic DNS setup not available for your system");
             println!("\n⚠️  Automatic DNS setup not available for your Linux distribution");
@@ -66,21 +96,14 @@ pub fn setup_dns() -> Result<()> {
 }
 
 /// Setup DNS on macOS using /etc/resolver/
-fn setup_dns_macos() -> Result<()> {
+fn setup_dns_macos(port: u16) -> Result<()> {
     debug!("Setting up macOS resolver for .iron domains");
 
     // Create /etc/resolver directory if it doesn't exist
     std::fs::create_dir_all("/etc/resolver")
         .context("Failed to create /etc/resolver directory (are you root?)")?;
 
-    // Write resolver configuration
-    let config = "# iron DNS resolver - routes .iron domains to iron's DNS server
-# Created by iron
-nameserver 127.0.0.1
-port 5333
-";
-
-    std::fs::write("/etc/resolver/iron", config)
+    std::fs::write(MACOS_RESOLVER_FILE, macos_config(port))
         .context("Failed to write /etc/resolver/iron (are you root?)")?;
 
     info!("DNS configured: /etc/resolver/iron created");
@@ -94,22 +117,14 @@ port 5333
 }
 
 /// Setup DNS on Linux with systemd-resolved
-fn setup_dns_linux_systemd() -> Result<()> {
+fn setup_dns_linux_systemd(port: u16) -> Result<()> {
     debug!("Setting up systemd-resolved for .iron domains");
 
     // Create drop-in directory if it doesn't exist
     std::fs::create_dir_all("/etc/systemd/resolved.conf.d")
         .context("Failed to create /etc/systemd/resolved.conf.d (are you root?)")?;
 
-    // Write resolver configuration
-    let config = "# iron DNS resolver - routes .iron domains to iron's DNS server
-# Created by iron
-[Resolve]
-DNS=127.0.0.1:5333
-Domains=~iron
-";
-
-    std::fs::write("/etc/systemd/resolved.conf.d/iron.conf", config)
+    std::fs::write(SYSTEMD_RESOLVER_FILE, systemd_config(port))
         .context("Failed to write /etc/systemd/resolved.conf.d/iron.conf (are you root?)")?;
 
     // Restart systemd-resolved
@@ -156,7 +171,7 @@ pub fn cleanup_dns() -> Result<()> {
 
 /// Clean up macOS DNS configuration
 fn cleanup_dns_macos() -> Result<()> {
-    let path = Path::new("/etc/resolver/iron");
+    let path = Path::new(MACOS_RESOLVER_FILE);
     if !path.exists() {
         println!("\n✓ DNS configuration not found (already clean)\n");
         return Ok(());
@@ -172,7 +187,7 @@ fn cleanup_dns_macos() -> Result<()> {
 
 /// Clean up Linux systemd-resolved DNS configuration
 fn cleanup_dns_linux_systemd() -> Result<()> {
-    let path = Path::new("/etc/systemd/resolved.conf.d/iron.conf");
+    let path = Path::new(SYSTEMD_RESOLVER_FILE);
     if !path.exists() {
         println!("\n✓ DNS configuration not found (already clean)\n");
         return Ok(());
@@ -217,8 +232,18 @@ mod tests {
     }
 
     #[test]
-    fn test_is_dns_configured() {
-        // Should not panic
-        let _ = is_dns_configured();
+    fn test_resolver_configs_use_port() {
+        let cases = [
+            (macos_config(5333), "port 5333\n"),
+            (macos_config(5454), "port 5454\n"),
+            (systemd_config(5333), "DNS=127.0.0.1:5333\n"),
+            (systemd_config(5454), "DNS=127.0.0.1:5454\n"),
+        ];
+        for (config, expected_line) in cases {
+            assert!(
+                config.contains(expected_line),
+                "{config:?} should contain {expected_line:?}"
+            );
+        }
     }
 }

@@ -337,7 +337,7 @@ cargo doc --open --no-deps
 
 - `keys.rs`: persistent identity storage and generation
 - `mapping.rs`: bidirectional EndpointId to IPv6 mapping
-- `dns.rs`: hickory-server based resolver for `.iron` domains
+- `dns.rs`: message-level resolver for `.iron` domains (UDP frontend + DNS-over-TUN, optional upstream forwarding)
 - `dns_config.rs`: auto-configuration for system DNS
 - `tun.rs`: virtual network device for packet interception
 - `protocol.rs`: iroh QUIC transport with connection pooling

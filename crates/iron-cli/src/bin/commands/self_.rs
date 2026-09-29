@@ -1,5 +1,5 @@
+use super::{key_path, load_key};
 use anyhow::{Context, Result};
-use iron_core::keys;
 use serde_json::json;
 
 pub fn run(
@@ -12,14 +12,14 @@ pub fn run(
 ) -> Result<()> {
     // Handle --exists flag (just check and exit)
     if exists {
-        match keys::load_key() {
+        match load_key() {
             Ok(_) => std::process::exit(0),
             Err(_) => std::process::exit(1),
         }
     }
 
     // Load the key
-    let secret_key = keys::load_key().context(
+    let secret_key = load_key().context(
         "No key file found\n\n\
         Run 'iron' once to generate a key, or use 'iron vanity' to create a custom key.",
     )?;
@@ -57,7 +57,7 @@ pub fn run(
     if let Some(fmt) = format {
         match fmt.to_lowercase().as_str() {
             "json" => {
-                let key_path = keys::key_path();
+                let key_path = key_path()?;
                 let output = json!({
                     "key_file": key_path.to_string_lossy(),
                     "key_exists": true,
@@ -82,7 +82,7 @@ pub fn run(
     }
 
     // Default: pretty output
-    let key_path = keys::key_path();
+    let key_path = key_path()?;
 
     println!("\nIron Node Identity:");
     println!("  Key file:  {}", key_path.display());

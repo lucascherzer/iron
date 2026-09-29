@@ -6,10 +6,10 @@
 //! Android, where the app must supply its private data directory) can point
 //! iron at the right place.
 //!
-//! Desktop callers use [`StatePaths::default_os`] (`$HOME/.config/iron`);
-//! everything else constructs [`StatePaths::new`] with an explicit directory.
+//! The platform crate decides the directory (desktop:
+//! `iron_desktop::default_state_paths`, `$HOME/.config/iron`) and passes it
+//! in via [`StatePaths::new`].
 
-use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Secret key file name inside the config directory.
@@ -33,12 +33,6 @@ impl StatePaths {
         Self {
             config_dir: config_dir.into(),
         }
-    }
-
-    /// Desktop default: `$HOME/.config/iron`.
-    pub fn default_os() -> Result<Self> {
-        let home = std::env::var("HOME").context("HOME environment variable not set")?;
-        Ok(Self::new(PathBuf::from(home).join(".config/iron")))
     }
 
     /// The directory all state files live in.
@@ -70,13 +64,5 @@ mod tests {
             paths.known_peers_file(),
             PathBuf::from("/data/iron/known_peers.json")
         );
-    }
-
-    #[test]
-    fn test_default_os_uses_home() {
-        // HOME is set in test environments on desktop.
-        if let Ok(paths) = StatePaths::default_os() {
-            assert!(paths.config_dir().ends_with(".config/iron"));
-        }
     }
 }

@@ -5,13 +5,13 @@ use crate::paths::StatePaths;
 use crate::platform::TunBackend;
 use crate::protocol::IronProtocol;
 use crate::router::PacketRouter;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use iroh::Endpoint;
 use iroh::endpoint::presets::N0;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Platform-dependent pieces an [`IronNode`] is assembled from.
 ///
@@ -178,35 +178,16 @@ impl IronNode {
         let node_ipv6 = self.registry.get_or_assign_ip(self.endpoint.id());
         let tun_io = self.tun.open(node_ipv6)?;
 
-        // Start DNS resolver
-        let dns = self.dns;
-        let dns_listen = self.dns_listen;
-        let dns_handle = tokio::spawn(async move {
-            if let Err(e) = crate::dns::serve_udp(dns, dns_listen).await {
-                error!("DNS resolver failed: {}", e);
-            }
-        });
-
-        // Start packet router
-        let router = self.router;
-        let router_handle = tokio::spawn(async move {
-            if let Err(e) = router.run(tun_io).await {
-                error!("Packet router failed: {}", e);
-            }
-        });
-
-        // Start protocol handler (runs in current task)
-        let protocol_result = self.protocol.run().await;
-
-        // If protocol handler exits, stop other components
-        info!("Protocol handler exited, shutting down other components");
-        dns_handle.abort();
-        router_handle.abort();
-
-        let _ = dns_handle.await;
-        let _ = router_handle.await;
-
+        // Run DNS, router and protocol concurrently. They are all meant to
+        // run forever, so whichever returns first (normally with an error,
+        // e.g. the DNS port is taken or TUN I/O failed) ends the node, and
+        // the others are dropped with it instead of limping on.
+        let result = tokio::select! {
+            r = crate::dns::serve_udp(self.dns, self.dns_listen) => r.context("DNS server failed"),
+            r = self.router.run(tun_io) => r.context("packet router failed"),
+            r = self.protocol.run() => r.context("protocol handler exited"),
+        };
         info!("IronNode shutdown complete");
-        protocol_result
+        result
     }
 }

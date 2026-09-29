@@ -11,15 +11,22 @@ mod tun;
 
 pub use tun::DesktopTun;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use iron_core::{NodeConfig, StatePaths};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+
+/// Desktop state directory: `$HOME/.config/iron`.
+pub fn default_state_paths() -> Result<StatePaths> {
+    let home = std::env::var("HOME").context("HOME environment variable not set")?;
+    Ok(StatePaths::new(PathBuf::from(home).join(".config/iron")))
+}
 
 /// Desktop defaults: state in `~/.config/iron`, DNS on `127.0.0.1:5333`,
 /// self-provisioned TUN device.
 pub fn desktop_node_config() -> Result<NodeConfig> {
     Ok(NodeConfig {
-        paths: StatePaths::default_os()?,
+        paths: default_state_paths()?,
         dns_listen: SocketAddr::from(([127, 0, 0, 1], 5333)),
         dns_upstream: vec![],
         tun: Box::new(DesktopTun),

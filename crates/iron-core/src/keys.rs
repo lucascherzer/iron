@@ -1,26 +1,15 @@
 //! Cryptographic key management for iron
 //!
 //! Handles persistence and loading of the node's private key.
-//! The key file location comes from [`StatePaths`] (on desktop:
-//! `~/.config/iron/secret.key`) and is written with 0600 permissions.
+//! The key file location comes from [`StatePaths`], chosen by the platform
+//! crate; the file is written with 0600 permissions.
 
 use crate::paths::StatePaths;
 use anyhow::{Context, Result};
 use iroh::SecretKey;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use tracing::{debug, info};
-
-/// Get the full path to the secret key file, using the desktop default
-/// location.
-///
-/// CLI convenience only; components that receive a [`StatePaths`] should use
-/// [`StatePaths::key_file`] instead.
-pub fn key_path() -> PathBuf {
-    StatePaths::default_os()
-        .map(|paths| paths.key_file())
-        .unwrap_or_else(|_| PathBuf::from("~/.config/iron/secret.key"))
-}
 
 /// Load or generate a persistent secret key
 ///
@@ -42,7 +31,7 @@ pub fn load_or_generate_key(paths: &StatePaths) -> Result<SecretKey> {
 
     if key_path.exists() {
         info!("Loading existing key from {}", key_path.display());
-        load_key_from_path(&key_path)
+        load_key(&key_path)
     } else {
         info!("No existing key found, generating new key");
         let key = SecretKey::generate();
@@ -52,19 +41,8 @@ pub fn load_or_generate_key(paths: &StatePaths) -> Result<SecretKey> {
     }
 }
 
-/// Load the secret key from the desktop default location.
-///
-/// CLI convenience only; components that receive a [`StatePaths`] should use
-/// [`load_or_generate_key`].
-pub fn load_key() -> Result<SecretKey> {
-    let key_path = StatePaths::default_os()
-        .context("cannot determine default key location")?
-        .key_file();
-    load_key_from_path(&key_path)
-}
-
 /// Load a secret key from a file
-fn load_key_from_path(path: &PathBuf) -> Result<SecretKey> {
+pub fn load_key(path: &Path) -> Result<SecretKey> {
     let bytes = fs::read(path).context("Failed to read key file")?;
 
     if bytes.len() != 32 {
@@ -85,7 +63,7 @@ fn load_key_from_path(path: &PathBuf) -> Result<SecretKey> {
 }
 
 /// Save a secret key to a file with secure permissions
-fn save_key(path: &PathBuf, key: &SecretKey) -> Result<()> {
+fn save_key(path: &Path, key: &SecretKey) -> Result<()> {
     // Create directory if it doesn't exist
     let dir = path
         .parent()
@@ -146,7 +124,7 @@ mod tests {
         save_key(&key_path, &original_key).unwrap();
 
         // Load the key
-        let loaded_key = load_key_from_path(&key_path).unwrap();
+        let loaded_key = load_key(&key_path).unwrap();
 
         // Verify they're the same
         assert_eq!(
@@ -175,7 +153,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("nonexistent.key");
 
-        let result = load_key_from_path(&key_path);
+        let result = load_key(&key_path);
         assert!(result.is_err(), "Loading nonexistent key should fail");
     }
 
@@ -187,7 +165,7 @@ mod tests {
         // Write invalid data (wrong size)
         fs::write(&key_path, [1, 2, 3, 4, 5]).unwrap();
 
-        let result = load_key_from_path(&key_path);
+        let result = load_key(&key_path);
         assert!(result.is_err(), "Loading key with invalid size should fail");
     }
 

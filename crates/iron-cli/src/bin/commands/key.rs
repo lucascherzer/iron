@@ -1,6 +1,6 @@
+use super::{key_path, load_key};
 use anyhow::{Context, Result};
 use iroh::SecretKey;
-use iron_core::keys;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ pub fn info(path: Option<String>) -> Result<()> {
     }
 
     // Load key to validate it
-    let secret_key = load_key_from_file(&key_path)?;
+    let secret_key = iron_core::keys::load_key(&key_path)?;
     let endpoint_id = secret_key.public();
 
     // Get file metadata
@@ -30,8 +30,7 @@ pub fn info(path: Option<String>) -> Result<()> {
 }
 
 pub fn export(format: String, output: Option<String>) -> Result<()> {
-    let secret_key =
-        keys::load_key().context("No key found. Generate one with: iron key generate")?;
+    let secret_key = load_key().context("No key found. Generate one with: iron key generate")?;
     let bytes = secret_key.to_bytes();
 
     let encoded = match format.to_lowercase().as_str() {
@@ -79,7 +78,7 @@ pub fn import(file: String, save: bool) -> Result<()> {
     println!("  Node ID: {}", hex::encode(endpoint_id.as_bytes()));
 
     if save {
-        let key_path = keys::key_path();
+        let key_path = key_path()?;
         if key_path.exists() {
             print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
             io::stdout().flush()?;
@@ -112,7 +111,7 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
     println!("  Domain:        {}.iron", base32_id);
 
     if save {
-        let key_path = keys::key_path();
+        let key_path = key_path()?;
 
         if key_path.exists() && !force {
             println!("\nWARNING: This will overwrite your existing key.");
@@ -142,7 +141,7 @@ pub fn validate(path: Option<String>) -> Result<()> {
         std::process::exit(1);
     }
 
-    match load_key_from_file(&key_path) {
+    match iron_core::keys::load_key(&key_path) {
         Ok(secret_key) => {
             let endpoint_id = secret_key.public();
             println!("✓ Valid key");
@@ -159,7 +158,7 @@ pub fn validate(path: Option<String>) -> Result<()> {
 }
 
 pub fn reset(confirm: bool) -> Result<()> {
-    let key_path = keys::key_path();
+    let key_path = key_path()?;
 
     if !key_path.exists() {
         println!("✓ No key file found (already clean)");
@@ -167,7 +166,7 @@ pub fn reset(confirm: bool) -> Result<()> {
     }
 
     // Show warning and get current node ID
-    let current_node_id = if let Ok(key) = keys::load_key() {
+    let current_node_id = if let Ok(key) = load_key() {
         let endpoint_id = key.public();
         let base32_id = data_encoding::BASE32_NOPAD
             .encode(endpoint_id.as_bytes())
@@ -202,21 +201,8 @@ fn path_or_default(path: Option<String>) -> Result<PathBuf> {
     Ok(if let Some(p) = path {
         PathBuf::from(p)
     } else {
-        keys::key_path()
+        key_path()?
     })
-}
-
-fn load_key_from_file(path: &PathBuf) -> Result<SecretKey> {
-    let bytes = fs::read(path).context("Failed to read key file")?;
-
-    if bytes.len() != 32 {
-        anyhow::bail!("Invalid key file: expected 32 bytes, got {}", bytes.len());
-    }
-
-    // Safe because we validated length
-    let mut byte_array = [0u8; 32];
-    byte_array.copy_from_slice(&bytes);
-    Ok(SecretKey::from_bytes(&byte_array))
 }
 
 fn save_key_bytes(path: &PathBuf, bytes: &[u8]) -> Result<()> {

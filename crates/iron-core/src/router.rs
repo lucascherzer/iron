@@ -43,7 +43,9 @@ pub struct PacketRouter {
     dns_resolver: Arc<DnsResolver>,
     /// DNS response packets from spawned resolver tasks, written to the TUN
     /// by the run loop (resolution may wait on an upstream, so it must not
-    /// block packet processing)
+    /// block packet processing). Unbounded channel, but bounded in practice:
+    /// each task holds a `DnsResolver::try_begin` permit until it has queued
+    /// its single reply.
     dns_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     dns_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
@@ -171,6 +173,9 @@ impl PacketRouter {
             && let Ok((udp, payload)) = UdpHeader::from_slice(ipv6_header.1)
             && udp.destination_port == 53
         {
+            let Some(permit) = self.dns_resolver.try_begin() else {
+                return Ok(());
+            };
             let payload = payload.to_vec();
             let source = ipv6_header.0.source_addr();
             let source_port = udp.source_port;
@@ -187,6 +192,7 @@ impl PacketRouter {
                         let _ = tx.send(packet);
                     }
                 }
+                drop(permit);
             });
             return Ok(());
         }

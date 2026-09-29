@@ -25,6 +25,7 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, trace, warn};
 
 /// In-tunnel DNS server address (UDP port 53).
@@ -44,6 +45,11 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Largest UDP datagram we accept.
 const MAX_UDP_MESSAGE: usize = 65535;
+
+/// Maximum queries being resolved at once (across all frontends). Queries
+/// beyond this are dropped and the client retries, so a query flood or a
+/// slow upstream can't grow tasks and memory without bound.
+const MAX_IN_FLIGHT: usize = 256;
 
 /// Forwards raw DNS messages to plain-UDP upstream servers, in order.
 ///
@@ -103,6 +109,7 @@ impl UdpUpstream {
 pub struct DnsResolver {
     registry: Arc<Registry>,
     upstream: Option<UdpUpstream>,
+    in_flight: Arc<Semaphore>,
 }
 
 impl DnsResolver {
@@ -112,7 +119,20 @@ impl DnsResolver {
         Self {
             registry,
             upstream: (!upstream.is_empty()).then(|| UdpUpstream::new(upstream)),
+            in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         }
+    }
+
+    /// Reserves a slot for resolving one query; `None` when
+    /// the maximum number of queries (256) is already in progress, in which case the
+    /// caller drops the query. Frontends hold the permit until the reply is
+    /// sent.
+    pub fn try_begin(&self) -> Option<OwnedSemaphorePermit> {
+        let permit = Arc::clone(&self.in_flight).try_acquire_owned().ok();
+        if permit.is_none() {
+            warn!("DNS overloaded ({MAX_IN_FLIGHT} queries in flight), dropping query");
+        }
+        permit
     }
 
     /// Resolves a raw DNS query message into a raw response message.
@@ -128,7 +148,10 @@ impl DnsResolver {
         let Ok(message) = Message::from_vec(query) else {
             return form_error(query);
         };
-        let Some(question) = message.queries().first() else {
+        // Exactly one question (RFC 9619). Checking only the first of
+        // several would let a `.iron` question ride along in a message that
+        // gets forwarded upstream verbatim.
+        let [question] = message.queries() else {
             return Some(response(&message, ResponseCode::FormErr, false, vec![]));
         };
         let name = question.name();
@@ -172,13 +195,24 @@ impl DnsResolver {
     }
 }
 
-/// Serves DNS over UDP on `listen` until the socket fails.
+/// Serves DNS over UDP on `listen`. Only fails if the socket can't be bound.
 pub async fn serve_udp(resolver: Arc<DnsResolver>, listen: SocketAddr) -> Result<()> {
     let socket = Arc::new(UdpSocket::bind(listen).await?);
     info!("DNS server listening on {}", listen);
     let mut buf = vec![0; MAX_UDP_MESSAGE];
     loop {
-        let (len, peer) = socket.recv_from(&mut buf).await?;
+        let (len, peer) = match socket.recv_from(&mut buf).await {
+            Ok(received) => received,
+            // Transient errors (e.g. ICMP-induced ECONNRESET on some OSes)
+            // must not take the DNS server down.
+            Err(e) => {
+                warn!("DNS socket receive failed: {}", e);
+                continue;
+            }
+        };
+        let Some(permit) = resolver.try_begin() else {
+            continue;
+        };
         let query = buf[..len].to_vec();
         let socket = Arc::clone(&socket);
         let resolver = Arc::clone(&resolver);
@@ -188,15 +222,17 @@ pub async fn serve_udp(resolver: Arc<DnsResolver>, listen: SocketAddr) -> Result
             {
                 warn!("Failed to send DNS response to {}: {}", peer, e);
             }
+            drop(permit);
         });
     }
 }
 
-/// True for names in the `.iron` zone, case-insensitively. Anything that
-/// isn't `.iron` may be forwarded upstream, so a case mismatch here would
-/// leak peer lookups to third-party resolvers.
+/// True for the `iron.` zone (apex and subdomains), case-insensitively.
+/// Anything that isn't `.iron` may be forwarded upstream, so a miss here
+/// would leak peer lookups to third-party resolvers.
 fn is_iron_name(name: &Name) -> bool {
-    name.to_lowercase().to_string().ends_with(".iron.")
+    let name = name.to_lowercase().to_string();
+    name == "iron." || name.ends_with(".iron.")
 }
 
 /// Parses `<base32 EndpointId>.iron.` (base32 without padding,
@@ -316,6 +352,8 @@ mod tests {
             ("a.Iron.", true),
             ("iron.com.", false),
             ("a.ironx.", false),
+            ("iron.", true),
+            ("IRON.", true),
         ];
         for (domain, expected) in cases {
             assert_eq!(
@@ -451,6 +489,55 @@ mod tests {
         let reply = Message::from_vec(&reply).unwrap();
         assert!(reply.authoritative());
         assert_eq!(reply.answers().len(), 1);
+    }
+
+    /// A second question must not smuggle a `.iron` name upstream: messages
+    /// without exactly one question are rejected, never forwarded.
+    #[tokio::test]
+    async fn test_resolve_rejects_multi_question() {
+        let upstream = fake_upstream().await;
+        let resolver = DnsResolver::new(Arc::new(Registry::new()), vec![upstream]);
+        let mut message = Message::new();
+        message.set_id(3);
+        message.add_query(Query::query(
+            Name::from_str("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        let iron = iron_domain(test_endpoint_id(4));
+        message.add_query(Query::query(
+            Name::from_str(&iron).unwrap(),
+            RecordType::AAAA,
+        ));
+
+        let reply = resolver.resolve(&message.to_vec().unwrap()).await.unwrap();
+        let reply = Message::from_vec(&reply).unwrap();
+        assert_eq!(reply.response_code(), ResponseCode::FormErr);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_iron_apex_is_not_forwarded() {
+        let upstream = fake_upstream().await;
+        let resolver = DnsResolver::new(Arc::new(Registry::new()), vec![upstream]);
+        let reply = resolver
+            .resolve(&query_bytes(2, "IRON.", RecordType::AAAA))
+            .await
+            .unwrap();
+        let reply = Message::from_vec(&reply).unwrap();
+        assert!(
+            reply.authoritative(),
+            "answered locally, not by the upstream"
+        );
+    }
+
+    #[test]
+    fn test_try_begin_limits_in_flight() {
+        let (_, resolver) = resolver();
+        let permits: Vec<_> = (0..MAX_IN_FLIGHT)
+            .map(|_| resolver.try_begin().unwrap())
+            .collect();
+        assert!(resolver.try_begin().is_none(), "limit reached");
+        drop(permits);
+        assert!(resolver.try_begin().is_some(), "slots are released");
     }
 
     #[tokio::test]

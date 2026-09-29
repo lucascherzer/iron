@@ -113,7 +113,7 @@ IPv6: fd69:726f:0000:0000:xxxx:xxxx:xxxx:xxxx
 # Third Party Software
 - iroh 0.95.1 (https://docs.rs/iroh/0.95.1/iroh/)
 - tun 0.8.5 (https://docs.rs/tun/0.8.5/tun)
-- hickory-server 0.25 (DNS server, successor to trust-dns)
+- hickory-proto 0.25 (DNS message parsing; the UDP server is a small tokio loop in `dns.rs`)
 - tokio 1.x (async runtime with full features)
 - dashmap 6 (concurrent hash maps for Registry)
 - etherparse 0.19 (IPv6 packet parsing)
@@ -152,7 +152,7 @@ handles packets without knowing whether that I/O came from a desktop TUN
 device or a file descriptor supplied by a future Android `VpnService`.
 `StatePaths` injects persistent storage, and desktop DNS system configuration
 lives in `crates/iron-desktop/src/dns_config.rs`, separate from the portable
-`IronDnsHandler` resolution logic.
+`DnsResolver` (message-level; shared by the UDP frontend and DNS-over-TUN).
 
 ## Packet Router Architecture
 **MVP Approach**: Single-threaded async loop

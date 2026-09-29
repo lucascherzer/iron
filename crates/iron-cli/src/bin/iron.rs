@@ -296,7 +296,7 @@ async fn start_daemon(
     fix_key_directory_ownership()?;
 
     // Setup DNS configuration automatically
-    setup_dns_for_daemon()?;
+    setup_dns_for_daemon(dns_port)?;
 
     // Initialize and start iron node with desktop platform defaults
     info!("Initializing iron node...");
@@ -404,8 +404,8 @@ async fn start_daemon(
 
 /// Setup DNS configuration for the daemon
 /// Auto-configures DNS on supported platforms
-fn setup_dns_for_daemon() -> Result<()> {
-    if dns_config::is_dns_configured() {
+fn setup_dns_for_daemon(dns_port: u16) -> Result<()> {
+    if dns_config::is_dns_configured(dns_port) {
         info!("DNS already configured for .iron domains");
         return Ok(());
     }
@@ -415,7 +415,7 @@ fn setup_dns_for_daemon() -> Result<()> {
 
     match dns_config::detect_platform() {
         dns_config::Platform::MacOS | dns_config::Platform::LinuxSystemd => {
-            match dns_config::setup_dns() {
+            match dns_config::setup_dns(dns_port) {
                 Ok(_) => {
                     info!("✓ DNS configured successfully");
                     Ok(())
@@ -507,7 +507,7 @@ fn fix_key_directory_ownership() -> Result<()> {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
-    let key_path = iron_core::keys::key_path();
+    let key_path = commands::key_path()?;
     let config_dir = key_path
         .parent()
         .context("Cannot determine config directory")?;
