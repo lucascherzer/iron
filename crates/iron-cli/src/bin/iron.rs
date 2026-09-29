@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use iron_core::IronNode;
 use iron_desktop::dns_config;
 use std::net::SocketAddr;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod commands;
 
@@ -296,7 +296,7 @@ async fn start_daemon(
     fix_key_directory_ownership()?;
 
     // Setup DNS configuration automatically
-    setup_dns_for_daemon(dns_port)?;
+    setup_dns_for_daemon(dns_port);
 
     // Initialize and start iron node with desktop platform defaults
     info!("Initializing iron node...");
@@ -399,36 +399,21 @@ async fn start_daemon(
     }
 }
 
-/// Setup DNS configuration for the daemon
-/// Auto-configures DNS on supported platforms
-fn setup_dns_for_daemon(dns_port: u16) -> Result<()> {
+/// Points `.iron` resolution at our DNS port; failures are logged, not fatal.
+fn setup_dns_for_daemon(dns_port: u16) {
     if dns_config::is_dns_configured(dns_port) {
         info!("DNS already configured for .iron domains");
-        return Ok(());
+        return;
     }
-
-    // DNS not configured - set it up automatically
     info!("Setting up DNS for .iron domains...");
-
-    match dns_config::detect_platform() {
-        dns_config::Platform::MacOS | dns_config::Platform::LinuxSystemd => {
-            match dns_config::setup_dns(dns_port) {
-                Ok(_) => {
-                    info!("✓ DNS configured successfully");
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to setup DNS: {}", e);
-                    info!("⚠️  DNS setup failed, but iron will continue running.");
-                    info!("You can manually cleanup later with: sudo iron --cleanup-dns");
-                    Ok(())
-                }
-            }
-        }
-        dns_config::Platform::LinuxOther => {
-            info!("⚠️  Automatic DNS setup not available for your system.");
-            info!("Please configure DNS manually to resolve .iron domains");
-            Ok(())
+    match dns_config::setup_dns(dns_port) {
+        Ok(()) => info!("✓ DNS configured successfully"),
+        // Not fatal: peers stay reachable by address, and DNS can be
+        // configured by hand.
+        Err(e) => {
+            warn!("⚠️  DNS setup failed: {e:#}");
+            warn!("iron will keep running, but .iron names may not resolve.");
+            warn!("You can clean up later with: sudo iron --cleanup-dns");
         }
     }
 }

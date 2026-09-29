@@ -151,7 +151,7 @@ provisions a device and returns raw packet I/O as `TunIo`; `PacketRouter`
 handles packets without knowing whether that I/O came from a desktop TUN
 device or a file descriptor supplied by a future Android `VpnService`.
 `StatePaths` injects persistent storage, and desktop DNS system configuration
-lives in `crates/iron-desktop/src/dns_config.rs`, separate from the portable
+lives in `crates/iron-desktop/src/dns_config/`, separate from the portable
 `DnsResolver` (message-level; shared by the UDP frontend and DNS-over-TUN).
 
 ## Packet Router Architecture
