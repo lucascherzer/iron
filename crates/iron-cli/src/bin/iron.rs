@@ -316,10 +316,7 @@ async fn start_daemon(
     info!("Node ID (hex):    {}", endpoint_id);
 
     // Convert to base32 for DNS
-    let endpoint_bytes = endpoint_id.as_bytes();
-    let base32_id = data_encoding::BASE32_NOPAD
-        .encode(endpoint_bytes)
-        .to_lowercase();
+    let base32_id = iron_core::id::to_base32(&endpoint_id);
 
     info!("Node ID (base32): {}", base32_id);
     info!("DNS name:         {}.iron", base32_id);

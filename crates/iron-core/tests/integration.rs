@@ -7,7 +7,7 @@
 //! - Key persistence
 //! - End-to-end packet flow (without actual network)
 
-use iroh::{EndpointId, SecretKey};
+use iroh::SecretKey;
 use iron_core::dns::DnsResolver;
 use iron_core::mapping::Registry;
 use iron_core::router::PacketRouter;
@@ -48,49 +48,21 @@ async fn test_registry_consistency_across_components() {
     assert_eq!(ipv6_a_from_dns, ipv6_a_from_registry2);
 }
 
-/// Test DNS resolution with base32 encoding
+/// A `.iron` domain decodes to the same EndpointId, and thus the same IPv6
+/// the registry assigns.
 #[tokio::test]
 async fn test_dns_resolution_base32_encoding() {
-    use hickory_proto::rr::LowerName;
-    use std::str::FromStr;
-
     let registry = Arc::new(Registry::new());
     let endpoint_id = test_endpoint_id(42);
 
-    // Expected IPv6 from registry
-    let expected_ipv6 = registry.get_or_assign_ip(endpoint_id);
+    let domain = iron_core::id::to_domain(&endpoint_id);
+    let decoded = iron_core::id::parse_domain(&domain).expect("valid .iron domain");
 
-    // Create DNS handler (internal to DnsResolver)
-    // We'll test via the parsing logic directly
-    let base32_encoded = data_encoding::BASE32_NOPAD.encode(endpoint_id.as_bytes());
-    assert_eq!(base32_encoded.len(), 52); // Fits in single DNS label!
-
-    let domain = format!("{}.iron.", base32_encoded.to_lowercase());
-
-    // Parse domain
-    let name = LowerName::from_str(&domain).expect("Valid domain");
-
-    // Extract label
-    let name_str = name.to_string();
-    let parts: Vec<&str> = name_str.split('.').collect();
-    assert_eq!(parts.len(), 3); // label + "iron" + ""
-    let encoded_id = parts[0];
-
-    // Verify it's the right length
-    assert_eq!(encoded_id.len(), 52);
-
-    // Decode to EndpointId
-    let bytes = data_encoding::BASE32_NOPAD
-        .decode(encoded_id.to_uppercase().as_bytes())
-        .expect("Valid base32");
-    let decoded_endpoint_id =
-        EndpointId::from_bytes(&bytes.try_into().unwrap()).expect("Valid EndpointId");
-
-    assert_eq!(decoded_endpoint_id, endpoint_id);
-
-    // Verify registry returns same IPv6
-    let ipv6_from_registry = registry.get_or_assign_ip(decoded_endpoint_id);
-    assert_eq!(ipv6_from_registry, expected_ipv6);
+    assert_eq!(decoded, endpoint_id);
+    assert_eq!(
+        registry.get_or_assign_ip(decoded),
+        registry.get_or_assign_ip(endpoint_id)
+    );
 }
 
 /// Test TUN packet processing (OS → Network direction)

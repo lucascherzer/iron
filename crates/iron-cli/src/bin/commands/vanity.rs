@@ -111,9 +111,7 @@ fn worker_loop(
 
         let secret_key = SecretKey::generate();
         let endpoint_id = secret_key.public();
-        let base32_id = data_encoding::BASE32_NOPAD
-            .encode(endpoint_id.as_bytes())
-            .to_lowercase();
+        let base32_id = iron_core::id::to_base32(&endpoint_id);
 
         local_attempts += 1;
 
@@ -180,9 +178,9 @@ fn display_result(result: &VanityResult, elapsed: Duration, quiet: bool) -> Resu
 
         println!("Node ID:");
         println!("  Base32:  {}", result.base32_id);
-        println!("  Hex:     {}", hex::encode(result.endpoint_id.as_bytes()));
+        println!("  Hex:     {}", result.endpoint_id);
         println!("  Domain:  {}.iron", result.base32_id);
-        let ipv6 = iron_core::mapping::Registry::derive_ip(result.endpoint_id);
+        let ipv6 = iron_core::id::derive_ip(&result.endpoint_id);
         println!("  IPv6:    {}", ipv6);
         println!();
         println!("Attempts:  {}", format_number(result.attempts));

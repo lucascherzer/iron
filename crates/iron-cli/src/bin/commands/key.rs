@@ -23,7 +23,7 @@ pub fn info(path: Option<String>) -> Result<()> {
     println!("\nKey file: {}", key_path.display());
     println!("Valid:    ✓");
     println!("Size:     {} bytes", size);
-    println!("Node ID:  {}", hex::encode(endpoint_id.as_bytes()));
+    println!("Node ID:  {}", endpoint_id);
     println!();
 
     Ok(())
@@ -75,7 +75,7 @@ pub fn import(file: String, save: bool) -> Result<()> {
     let endpoint_id = secret_key.public();
 
     println!("✓ Valid key imported");
-    println!("  Node ID: {}", hex::encode(endpoint_id.as_bytes()));
+    println!("  Node ID: {}", endpoint_id);
 
     if save {
         let key_path = key_path()?;
@@ -103,11 +103,9 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
     let endpoint_id = secret_key.public();
 
     println!("✓ New key generated");
-    println!("  Node ID (hex): {}", hex::encode(endpoint_id.as_bytes()));
+    println!("  Node ID (hex): {}", endpoint_id);
 
-    let base32_id = data_encoding::BASE32_NOPAD
-        .encode(endpoint_id.as_bytes())
-        .to_lowercase();
+    let base32_id = iron_core::id::to_base32(&endpoint_id);
     println!("  Domain:        {}.iron", base32_id);
 
     if save {
@@ -146,7 +144,7 @@ pub fn validate(path: Option<String>) -> Result<()> {
             let endpoint_id = secret_key.public();
             println!("✓ Valid key");
             println!("  Path:    {}", key_path.display());
-            println!("  Node ID: {}", hex::encode(endpoint_id.as_bytes()));
+            println!("  Node ID: {}", endpoint_id);
         }
         Err(e) => {
             println!("✗ Invalid key file: {}", e);
@@ -168,9 +166,7 @@ pub fn reset(confirm: bool) -> Result<()> {
     // Show warning and get current node ID
     let current_node_id = if let Ok(key) = load_key() {
         let endpoint_id = key.public();
-        let base32_id = data_encoding::BASE32_NOPAD
-            .encode(endpoint_id.as_bytes())
-            .to_lowercase();
+        let base32_id = iron_core::id::to_base32(&endpoint_id);
         format!("{}.iron", base32_id)
     } else {
         "unknown".to_string()

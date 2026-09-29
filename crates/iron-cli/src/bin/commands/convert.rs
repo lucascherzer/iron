@@ -1,192 +1,155 @@
-use anyhow::{Context, Result, anyhow};
+//! `iron convert`: show a node ID in its different forms.
+
+use anyhow::{Result, bail};
 use iroh::EndpointId;
+use iron_core::id;
 use std::net::Ipv6Addr;
 
-pub fn run(value: String, to: Option<String>) -> Result<()> {
-    let formats = detect_and_convert(&value)?;
+/// The forms a node ID can be rendered in. The ID itself is the only stored
+/// value; every form is derived from it when printed (see `iron_core::id`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdFormat {
+    Hex,
+    Base32,
+    Domain,
+    Ipv6,
+}
 
-    // If specific format requested, show only that
-    if let Some(format) = to {
-        match format.to_lowercase().as_str() {
-            "hex" => println!("{}", formats.hex),
-            "base32" => println!("{}", formats.base32),
-            "iron" | "domain" => println!("{}", formats.domain),
-            "ipv6" => println!("{}", formats.ipv6),
-            _ => {
-                return Err(anyhow!(
-                    "Invalid format '{}'. Valid formats: hex, base32, iron, ipv6",
-                    format
-                ));
-            }
-        }
-    } else {
-        // Show all formats
-        println!("\nNode ID formats:");
-        println!("  Hex:     {}", formats.hex);
-        println!("  Base32:  {}", formats.base32);
-        println!("  Domain:  {}", formats.domain);
-        println!("  IPv6:    {}", formats.ipv6);
-        println!();
+impl IdFormat {
+    const ALL: [IdFormat; 4] = [Self::Hex, Self::Base32, Self::Domain, Self::Ipv6];
+
+    fn parse(name: &str) -> Result<Self> {
+        Ok(match name.to_lowercase().as_str() {
+            "hex" => Self::Hex,
+            "base32" => Self::Base32,
+            "iron" | "domain" => Self::Domain,
+            "ipv6" => Self::Ipv6,
+            _ => bail!("Invalid format '{name}'. Valid formats: hex, base32, iron, ipv6"),
+        })
     }
 
+    fn label(self) -> &'static str {
+        match self {
+            Self::Hex => "Hex",
+            Self::Base32 => "Base32",
+            Self::Domain => "Domain",
+            Self::Ipv6 => "IPv6",
+        }
+    }
+
+    fn render(self, endpoint_id: &EndpointId) -> String {
+        match self {
+            Self::Hex => endpoint_id.to_string(),
+            Self::Base32 => id::to_base32(endpoint_id),
+            Self::Domain => id::to_domain(endpoint_id),
+            Self::Ipv6 => id::derive_ip(endpoint_id).to_string(),
+        }
+    }
+}
+
+pub fn run(value: String, to: Option<String>) -> Result<()> {
+    let endpoint_id = parse_id(&value)?;
+    match to {
+        Some(format) => println!("{}", IdFormat::parse(&format)?.render(&endpoint_id)),
+        None => {
+            println!("\nNode ID formats:");
+            for format in IdFormat::ALL {
+                let label = format!("{}:", format.label());
+                println!("  {label:<9}{}", format.render(&endpoint_id));
+            }
+            println!();
+        }
+    }
     Ok(())
 }
 
-#[derive(Debug)]
-struct Formats {
-    hex: String,
-    base32: String,
-    domain: String,
-    ipv6: String,
-}
-
-fn detect_and_convert(value: &str) -> Result<Formats> {
-    let trimmed = value.trim();
-
-    // 1. Check if it's a .iron domain
-    if let Some(base32_part) = trimmed.strip_suffix(".iron") {
-        return convert_from_base32(base32_part);
+/// Parses a node ID given as `.iron` domain, base32 or hex.
+///
+/// IPv6 addresses are rejected with an explanation: they contain only the
+/// last 64 bits of the key, so the ID can't be recovered from them.
+fn parse_id(value: &str) -> Result<EndpointId> {
+    let value = value.trim();
+    let parsed = id::parse_domain(value)
+        .or_else(|| id::parse_base32(value))
+        .or_else(|| id::parse_hex(value));
+    if let Some(endpoint_id) = parsed {
+        return Ok(endpoint_id);
     }
-
-    // 2. Check if it's 52 chars (base32 Node ID)
-    if trimmed.len() == 52 && is_valid_base32(trimmed) {
-        return convert_from_base32(trimmed);
+    if value.parse::<Ipv6Addr>().is_ok() {
+        bail!(
+            "Cannot convert IPv6 address to Node ID\n\n\
+            IPv6 addresses are derived from Node IDs (one-way function).\n\
+            There is no reverse mapping from IPv6 to Node ID.\n\n\
+            To find the Node ID for an IPv6, check the peer's logs or ask\n\
+            for its .iron name."
+        );
     }
-
-    // 3. Check if it's 64 chars hex (hex Node ID)
-    if trimmed.len() == 64 && is_valid_hex(trimmed) {
-        return convert_from_hex(trimmed);
-    }
-
-    // 4. Check if it contains ':' (IPv6)
-    if trimmed.contains(':') {
-        return convert_from_ipv6(trimmed);
-    }
-
-    Err(anyhow!(
-        "Unable to detect format of '{}'\n\n\
+    bail!(
+        "Unable to detect format of '{value}'\n\n\
         Supported formats:\n\
         - Base32 Node ID (52 chars): df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq\n\
         - Hex Node ID (64 chars): 74df87cccf7e0fead1370fc39f65be3de44f5069f5db87f3b08435ccdaf3b5b9\n\
-        - .iron domain: df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron\n\
-        - IPv6 address: fd69:726f::0842:35cc:daf3:b5b9",
-        trimmed
-    ))
-}
-
-fn convert_from_base32(base32: &str) -> Result<Formats> {
-    // Decode base32 to bytes
-    let bytes = data_encoding::BASE32_NOPAD
-        .decode(base32.to_uppercase().as_bytes())
-        .context("Invalid base32 encoding")?;
-
-    if bytes.len() != 32 {
-        return Err(anyhow!(
-            "Base32 decoded to {} bytes, expected 32",
-            bytes.len()
-        ));
-    }
-
-    // Convert to EndpointId - safe because we validated length
-    let mut byte_array = [0u8; 32];
-    byte_array.copy_from_slice(&bytes);
-    let endpoint_id = EndpointId::from_bytes(&byte_array).context("Invalid EndpointId bytes")?;
-
-    // Derive IPv6
-    let ipv6 = iron_core::mapping::Registry::derive_ip(endpoint_id);
-
-    Ok(Formats {
-        hex: hex::encode(endpoint_id.as_bytes()),
-        base32: base32.to_lowercase(),
-        domain: format!("{}.iron", base32.to_lowercase()),
-        ipv6: ipv6.to_string(),
-    })
-}
-
-fn convert_from_hex(hex_str: &str) -> Result<Formats> {
-    // Decode hex to bytes
-    let bytes = hex::decode(hex_str).context("Invalid hex encoding")?;
-
-    if bytes.len() != 32 {
-        return Err(anyhow!("Hex decoded to {} bytes, expected 32", bytes.len()));
-    }
-
-    // Convert to EndpointId - safe because we validated length
-    let mut byte_array = [0u8; 32];
-    byte_array.copy_from_slice(&bytes);
-    let endpoint_id = EndpointId::from_bytes(&byte_array).context("Invalid EndpointId bytes")?;
-
-    // Encode as base32
-    let base32 = data_encoding::BASE32_NOPAD
-        .encode(endpoint_id.as_bytes())
-        .to_lowercase();
-
-    // Derive IPv6
-    let ipv6 = iron_core::mapping::Registry::derive_ip(endpoint_id);
-
-    Ok(Formats {
-        hex: hex_str.to_lowercase(),
-        base32: base32.clone(),
-        domain: format!("{}.iron", base32),
-        ipv6: ipv6.to_string(),
-    })
-}
-
-fn convert_from_ipv6(ipv6_str: &str) -> Result<Formats> {
-    let _ipv6: Ipv6Addr = ipv6_str.parse().context("Invalid IPv6 address format")?;
-
-    Err(anyhow!(
-        "Cannot convert IPv6 address to Node ID\n\n\
-        IPv6 addresses are derived from Node IDs (one-way function).\n\
-        There is no reverse mapping from IPv6 to Node ID.\n\n\
-        To find the Node ID for an IPv6, you need to:\n\
-        - Check iron's DNS resolver: dig @127.0.0.1 -p 5333 -x {}\n\
-        - Or check the peer's registry/logs",
-        ipv6_str
-    ))
-}
-
-fn is_valid_base32(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_lowercase() || "234567".contains(c))
-}
-
-fn is_valid_hex(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_hexdigit())
+        - .iron domain: df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const BASE32: &str = "df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq";
+
     #[test]
-    fn test_detect_base32() {
-        let result = detect_and_convert("df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq");
-        assert!(result.is_ok());
+    fn test_parse_id() {
+        let expected = id::parse_base32(BASE32).unwrap();
+        let hex = expected.to_string();
+        let cases = [
+            (BASE32.to_string(), true),
+            (BASE32.to_uppercase(), true),
+            (format!("{BASE32}.iron"), true),
+            (format!("  {BASE32}.iron\n"), true),
+            (hex.clone(), true),
+            (hex.to_uppercase(), true),
+            ("fd69:726f::842:35cc:daf3:b5b9".to_string(), false),
+            ("invalid".to_string(), false),
+        ];
+        for (input, ok) in cases {
+            let parsed = parse_id(&input);
+            assert_eq!(parsed.is_ok(), ok, "parsing {input:?}: {parsed:?}");
+            if ok {
+                assert_eq!(parsed.unwrap(), expected, "parsing {input:?}");
+            }
+        }
     }
 
     #[test]
-    fn test_detect_iron_domain() {
-        let result =
-            detect_and_convert("df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron");
-        assert!(result.is_ok());
+    fn test_ipv6_explains_why_it_cannot_convert() {
+        let err = parse_id("fd69:726f::842:35cc:daf3:b5b9").unwrap_err();
+        assert!(err.to_string().contains("Cannot convert IPv6"));
     }
 
     #[test]
-    fn test_ipv6_no_reverse() {
-        let result = detect_and_convert("fd69:726f::0842:35cc:daf3:b5b9");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Cannot convert IPv6")
-        );
-    }
-
-    #[test]
-    fn test_invalid_format() {
-        let result = detect_and_convert("invalid");
-        assert!(result.is_err());
+    fn test_render_is_consistent() {
+        let endpoint_id = id::parse_base32(BASE32).unwrap();
+        let cases = [
+            ("hex", endpoint_id.to_string()),
+            ("base32", BASE32.to_string()),
+            ("iron", format!("{BASE32}.iron")),
+            ("DOMAIN", format!("{BASE32}.iron")),
+            ("ipv6", id::derive_ip(&endpoint_id).to_string()),
+        ];
+        for (name, expected) in cases {
+            let format = IdFormat::parse(name).unwrap();
+            assert_eq!(format.render(&endpoint_id), expected, "format {name}");
+            // Every rendering except IPv6 parses back to the same ID.
+            if format != IdFormat::Ipv6 {
+                assert_eq!(
+                    parse_id(&expected).unwrap(),
+                    endpoint_id,
+                    "roundtrip {name}"
+                );
+            }
+        }
+        assert!(IdFormat::parse("bogus").is_err());
     }
 }

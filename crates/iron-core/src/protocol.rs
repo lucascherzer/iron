@@ -242,9 +242,7 @@ impl IronProtocol {
             };
 
             let sender_id = conn.remote_id();
-            let base32_id = data_encoding::BASE32_NOPAD
-                .encode(sender_id.as_bytes())
-                .to_lowercase();
+            let base32_id = crate::id::to_base32(&sender_id);
 
             debug!("Accepted connection from {}", base32_id);
 

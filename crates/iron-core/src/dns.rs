@@ -20,7 +20,6 @@ use crate::mapping::Registry;
 use anyhow::{Result, anyhow};
 use hickory_proto::op::{Header, Message, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use iroh::EndpointId;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +29,7 @@ use tracing::{debug, info, trace, warn};
 
 /// In-tunnel DNS server address (UDP port 53).
 ///
-/// Collision-free by construction: [`Registry::derive_ip`] always produces
+/// Collision-free by construction: [`crate::id::derive_ip`] always produces
 /// `fd69:726f:0:0:…` (groups 3–4 are zero), so nothing in the
 /// `fd69:726f:0:1::/64` subnet can ever be a peer address, not even for a
 /// deliberately ground vanity key. It still lies inside the
@@ -174,7 +173,7 @@ impl DnsResolver {
             return Some(response(&message, ResponseCode::NoError, true, vec![]));
         }
 
-        match parse_endpoint_from_domain(name) {
+        match crate::id::parse_domain(&name.to_string()) {
             Some(endpoint_id) => {
                 let ip = self.registry.get_or_assign_ip(endpoint_id);
                 debug!("Resolved {} -> {}", name, ip);
@@ -235,20 +234,6 @@ fn is_iron_name(name: &Name) -> bool {
     name == "iron." || name.ends_with(".iron.")
 }
 
-/// Parses `<base32 EndpointId>.iron.` (base32 without padding,
-/// case-insensitive; 52 chars, fits a single DNS label).
-fn parse_endpoint_from_domain(name: &Name) -> Option<EndpointId> {
-    let text = name.to_lowercase().to_string();
-    let label = match text.split('.').collect::<Vec<_>>().as_slice() {
-        [label, "iron", ""] => *label,
-        _ => return None,
-    };
-    let bytes = data_encoding::BASE32_NOPAD
-        .decode(label.to_uppercase().as_bytes())
-        .ok()?;
-    EndpointId::from_bytes(&bytes.try_into().ok()?).ok()
-}
-
 fn response(
     request: &Message,
     code: ResponseCode,
@@ -285,15 +270,11 @@ mod tests {
     use super::*;
     use crate::test_utils::test_endpoint_id;
     use hickory_proto::op::Query;
+    use iroh::EndpointId;
     use std::str::FromStr;
 
     fn iron_domain(endpoint_id: EndpointId) -> String {
-        format!(
-            "{}.iron.",
-            data_encoding::BASE32_NOPAD
-                .encode(endpoint_id.as_bytes())
-                .to_lowercase()
-        )
+        format!("{}.", crate::id::to_domain(&endpoint_id))
     }
 
     fn query_bytes(id: u16, name: &str, record_type: RecordType) -> Vec<u8> {
@@ -318,29 +299,8 @@ mod tests {
             "magic addr must be inside the routed /32"
         );
         for i in 0..=255u8 {
-            let peer = Registry::derive_ip(test_endpoint_id(i));
+            let peer = crate::id::derive_ip(&test_endpoint_id(i));
             assert_ne!(peer.segments()[..4], MAGIC_DNS_ADDR.segments()[..4]);
-        }
-    }
-
-    #[test]
-    fn test_parse_endpoint_from_domain() {
-        let endpoint_id = test_endpoint_id(42);
-        let lower = iron_domain(endpoint_id);
-        let cases = [
-            (lower.clone(), Some(endpoint_id)),
-            (lower.to_uppercase(), Some(endpoint_id)),
-            ("example.com.".to_string(), None),
-            ("invalidbase32withlowercase.iron.".to_string(), None),
-            (format!("sub.{}", lower), None),
-        ];
-        for (domain, expected) in cases {
-            let name = Name::from_str(&domain).unwrap();
-            assert_eq!(
-                parse_endpoint_from_domain(&name),
-                expected,
-                "parsing {domain}"
-            );
         }
     }
 
@@ -426,7 +386,7 @@ mod tests {
             .await
             .unwrap();
         let reply = Message::from_vec(&reply).unwrap();
-        let expected = Registry::derive_ip(endpoint_id);
+        let expected = crate::id::derive_ip(&endpoint_id);
         assert_eq!(reply.answers()[0].data(), &RData::AAAA(expected.into()));
         assert_eq!(registry.get_endpoint_id(&expected), Some(endpoint_id));
     }

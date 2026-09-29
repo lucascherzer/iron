@@ -25,15 +25,12 @@ pub fn run(
     )?;
 
     let endpoint_id = secret_key.public();
-    let endpoint_bytes = endpoint_id.as_bytes();
 
     // Calculate formats
-    let hex_id = hex::encode(endpoint_bytes);
-    let base32_id = data_encoding::BASE32_NOPAD
-        .encode(endpoint_bytes)
-        .to_lowercase();
-    let domain_name = format!("{}.iron", base32_id);
-    let ipv6_addr = iron_core::mapping::Registry::derive_ip(endpoint_id);
+    let hex_id = endpoint_id.to_string();
+    let base32_id = iron_core::id::to_base32(&endpoint_id);
+    let domain_name = iron_core::id::to_domain(&endpoint_id);
+    let ipv6_addr = iron_core::id::derive_ip(&endpoint_id);
 
     // Single field outputs
     if hex {

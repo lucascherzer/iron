@@ -76,17 +76,8 @@ pub async fn run(
     let base32_part = domain
         .strip_suffix(".iron")
         .context("Domain should end with .iron (already validated)")?;
-    let node_id_hex = if let Ok(bytes) =
-        data_encoding::BASE32_NOPAD.decode(base32_part.to_uppercase().as_bytes())
-    {
-        if bytes.len() == 32 {
-            hex::encode(bytes)
-        } else {
-            "unknown".to_string()
-        }
-    } else {
-        "unknown".to_string()
-    };
+    let node_id_hex = iron_core::id::parse_base32(base32_part)
+        .map_or_else(|| "unknown".to_string(), |id| id.to_string());
 
     // Output
     if json_output {

@@ -56,7 +56,7 @@ impl Registry {
         }
 
         // Derive a new IPv6 address
-        let ip = Self::derive_ip(endpoint_id);
+        let ip = crate::id::derive_ip(&endpoint_id);
         debug!("New mapping: {} -> {}", endpoint_id, ip);
 
         // Insert into both maps for bi-directional lookup
@@ -83,37 +83,6 @@ impl Registry {
             trace!("Reverse lookup miss: {}", ip);
         }
         result
-    }
-
-    /// Derives a stable IPv6 address from an EndpointId.
-    ///
-    /// Uses the last 8 bytes (64 bits) of the 32-byte EndpointId as the IPv6 suffix,
-    /// combined with the iron ULA prefix fd69:726f::/32.
-    ///
-    /// # Implementation
-    ///
-    /// ```ignore
-    /// let bytes = endpoint_id.as_bytes(); // 32 bytes
-    /// let suffix = &bytes[24..32];        // Last 8 bytes
-    /// // Construct: fd69:726f:0000:0000:[suffix as 4x u16]
-    /// ```
-    pub fn derive_ip(endpoint_id: EndpointId) -> Ipv6Addr {
-        let bytes = endpoint_id.as_bytes();
-
-        // Take last 8 bytes (64 bits) for the IPv6 suffix
-        let suffix = &bytes[24..32];
-
-        // Construct IPv6 address with iron ULA prefix
-        Ipv6Addr::new(
-            0xfd69, // ULA + 'i'
-            0x726f, // 'r' + 'o'
-            0x0000, // Reserved
-            0x0000, // Reserved
-            u16::from_be_bytes([suffix[0], suffix[1]]),
-            u16::from_be_bytes([suffix[2], suffix[3]]),
-            u16::from_be_bytes([suffix[4], suffix[5]]),
-            u16::from_be_bytes([suffix[6], suffix[7]]),
-        )
     }
 
     /// Saves known peer EndpointIds to disk for persistence across restarts
@@ -158,9 +127,7 @@ impl Registry {
             .iter()
             .map(|entry| {
                 // Encode EndpointId as base32 (same format as .iron domains)
-                data_encoding::BASE32_NOPAD
-                    .encode(entry.key().as_bytes())
-                    .to_lowercase()
+                crate::id::to_base32(entry.key())
             })
             .collect();
 
@@ -213,32 +180,9 @@ impl Registry {
 
         let mut loaded = 0;
         for peer_base32 in peer_ids {
-            // Decode base32 to bytes
-            let endpoint_bytes =
-                match data_encoding::BASE32_NOPAD.decode(peer_base32.to_uppercase().as_bytes()) {
-                    Ok(b) if b.len() == 32 => b,
-                    Ok(_) => {
-                        warn!("Invalid EndpointId length in known peers: {}", peer_base32);
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Invalid base32 encoding in known peers: {} ({})",
-                            peer_base32, e
-                        );
-                        continue;
-                    }
-                };
-
-            let mut bytes_array = [0u8; 32];
-            bytes_array.copy_from_slice(&endpoint_bytes);
-
-            let endpoint_id = match EndpointId::from_bytes(&bytes_array) {
-                Ok(id) => id,
-                Err(e) => {
-                    warn!("Invalid EndpointId in known peers: {} ({})", peer_base32, e);
-                    continue;
-                }
+            let Some(endpoint_id) = crate::id::parse_base32(&peer_base32) else {
+                warn!("Invalid EndpointId in known peers: {}", peer_base32);
+                continue;
             };
 
             // Use get_or_assign_ip to populate both mappings
@@ -278,9 +222,9 @@ mod tests {
         let endpoint_id = test_endpoint_id(42);
 
         // Derive IP multiple times - should always be the same
-        let ip1 = Registry::derive_ip(endpoint_id);
-        let ip2 = Registry::derive_ip(endpoint_id);
-        let ip3 = Registry::derive_ip(endpoint_id);
+        let ip1 = crate::id::derive_ip(&endpoint_id);
+        let ip2 = crate::id::derive_ip(&endpoint_id);
+        let ip3 = crate::id::derive_ip(&endpoint_id);
 
         assert_eq!(ip1, ip2, "Derivation should be deterministic");
         assert_eq!(ip2, ip3, "Derivation should be deterministic");
@@ -291,7 +235,7 @@ mod tests {
         let _registry = Registry::new();
         let endpoint_id = test_endpoint_id(1);
 
-        let ip = Registry::derive_ip(endpoint_id);
+        let ip = crate::id::derive_ip(&endpoint_id);
         let segments = ip.segments();
 
         // Check that prefix is correct: fd69:726f:0000:0000

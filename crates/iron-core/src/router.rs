@@ -221,11 +221,7 @@ impl PacketRouter {
 
         // Lookup EndpointId for destination
         if let Some(endpoint_id) = self.registry.get_endpoint_id(&dest_addr) {
-            debug!(
-                "Resolved {} -> EndpointId {}",
-                dest_addr,
-                hex::encode(endpoint_id.as_bytes())
-            );
+            debug!("Resolved {} -> EndpointId {}", dest_addr, endpoint_id);
 
             // Send to network layer (iroh will handle actual transmission)
             self.to_network_tx
@@ -488,12 +484,7 @@ mod tests {
 
         // App at fd69:726f::1234 port 40000 asks the magic DNS server
         let peer = test_endpoint_id(11);
-        let domain = format!(
-            "{}.iron.",
-            data_encoding::BASE32_NOPAD
-                .encode(peer.as_bytes())
-                .to_lowercase()
-        );
+        let domain = format!("{}.", crate::id::to_domain(&peer));
         let mut query = Message::new();
         query.set_id(0x5151);
         query.add_query(Query::query(
@@ -540,7 +531,7 @@ mod tests {
         assert_eq!(reply.id(), 0x5151);
         assert_eq!(
             reply.answers()[0].data(),
-            &RData::AAAA(Registry::derive_ip(peer).into())
+            &RData::AAAA(crate::id::derive_ip(&peer).into())
         );
 
         assert!(

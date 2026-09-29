@@ -26,6 +26,7 @@
 //! `doc/proposals/platform-abstraction.md`.
 
 pub mod dns;
+pub mod id;
 pub mod keys;
 pub mod mapping;
 pub mod node;
