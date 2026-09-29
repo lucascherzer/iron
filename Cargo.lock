@@ -1822,6 +1822,7 @@ dependencies = [
  "iron-core",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "tun",
 ]
 

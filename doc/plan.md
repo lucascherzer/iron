@@ -41,6 +41,17 @@
   DNS address is `fd69:726f:0:1::53`; non-`.iron` queries can use configured
   UDP upstreams.
 
+### Follow-up cleanup (`refactor/id-registry-cleanup`)
+- `iron_core::id`: one module for base32 / `.iron` domain / hex / derived
+  IPv6 forms of an EndpointId (replaced ~12 copy-pasted snippets);
+  `iron convert` renders every form from one parsed EndpointId.
+- `Registry` stores only IPv6 → peer (the forward direction is the pure
+  `id::derive_ip`); `get_or_assign_ip` renamed to `register`.
+- `dns_config` and desktop TUN setup split into per-OS modules.
+- TUN device is IPv6-only: the placeholder IPv4 address and
+  `disable_ipv4()` are gone. **Needs a manual check with sudo on Linux
+  and macOS** (`sudo cargo run -p iron-desktop --example test_tun`).
+
 ## Recent Updates (Jan 21, 2026)
 
 ### ✅ Packet Abstraction Refactor (Phase 1) - COMPLETE!

@@ -339,7 +339,7 @@ cargo doc --open --no-deps
 - `id.rs`: node ID forms (base32, `.iron` domain, derived IPv6)
 - `mapping.rs`: registry of known peers by derived IPv6 (for routing)
 - `dns.rs`: message-level resolver for `.iron` domains (UDP frontend + DNS-over-TUN, optional upstream forwarding)
-- `dns_config.rs`: auto-configuration for system DNS
+- `dns_config/`: auto-configuration for system DNS (per-OS modules)
 - `tun.rs`: virtual network device for packet interception
 - `protocol.rs`: iroh QUIC transport with connection pooling
 - `node.rs`: component lifecycle management

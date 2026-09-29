@@ -1,34 +1,23 @@
-use tun::{AbstractDevice, Configuration, Layer};
+//! Manual check of the desktop TUN setup, without the rest of iron:
+//!
+//! ```sh
+//! sudo cargo run -p iron-desktop --example test_tun
+//! ```
+//!
+//! Creates the device exactly as `iron serve` does (IPv6-only, node address,
+//! `fd69:726f::/32` route) and keeps it up until Enter is pressed, so it can
+//! be inspected with `ifconfig` / `ip addr` and `netstat -rn` / `ip -6 route`.
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Testing TUN device creation...");
+use iron_core::platform::TunBackend;
+use iron_desktop::DesktopTun;
+use std::net::Ipv6Addr;
 
-    let mut config = Configuration::default();
-    config
-        .layer(Layer::L3)
-        .address((169, 254, 0, 1))
-        .destination((169, 254, 0, 2))
-        .mtu(1420)
-        .up();
-
-    #[cfg(target_os = "macos")]
-    config.tun_name("utun");
-
-    #[cfg(target_os = "linux")]
-    config.tun_name("iron0");
-
-    println!("Configuration: {:?}", config);
-
-    match tun::create(&config) {
-        Ok(device) => {
-            println!("✓ TUN device created successfully!");
-            println!("  Name: {}", device.tun_name()?);
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to create TUN device: {:?}", e);
-            eprintln!("  Error details: {}", e);
-            Err(e.into())
-        }
-    }
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_env_filter("debug").init();
+    let node_ipv6 = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
+    let _io = DesktopTun.open(node_ipv6)?;
+    println!("TUN device is up with {node_ipv6}. Inspect it, then press Enter to remove it.");
+    std::io::stdin().read_line(&mut String::new())?;
+    Ok(())
 }
