@@ -11,7 +11,6 @@ name = "iron"
 
 [workspace.dependencies]
 anyhow = "1.0"
-async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 data-encoding = "2"
 dashmap = "6"
@@ -20,7 +19,6 @@ futures = "0.3"
 hex = "0.4"
 hickory-client = "0.25"
 hickory-proto = "0.25"
-hickory-server = "0.25"
 iroh = "1.0.0-rc.0"
 iron-core = { path = "crates/iron-core" }
 iron-desktop = { path = "crates/iron-desktop" }

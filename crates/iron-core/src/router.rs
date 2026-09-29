@@ -1,8 +1,9 @@
+use crate::dns::{DnsResolver, MAGIC_DNS_ADDR};
 use crate::mapping::Registry;
 use crate::packet::Packet;
 use crate::platform::TunIo;
 use anyhow::{Context, Result};
-use etherparse::{Ipv6Header, TcpHeader};
+use etherparse::{Ipv6Header, PacketBuilder, TcpHeader, UdpHeader};
 use futures::{SinkExt, StreamExt};
 use iroh::EndpointId;
 use std::sync::Arc;
@@ -38,6 +39,13 @@ pub struct PacketRouter {
     /// Channel for receiving packets FROM network (iroh → OS)
     /// Format: Packet (with correct source IPv6 already set)
     from_network_rx: mpsc::UnboundedReceiver<Packet>,
+    /// Resolver for DNS queries addressed to [`MAGIC_DNS_ADDR`]
+    dns_resolver: Arc<DnsResolver>,
+    /// DNS response packets from spawned resolver tasks, written to the TUN
+    /// by the run loop (resolution may wait on an upstream, so it must not
+    /// block packet processing)
+    dns_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    dns_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl PacketRouter {
@@ -46,17 +54,24 @@ impl PacketRouter {
     /// # Arguments
     ///
     /// * `registry` - Shared registry for IPv6 <-> EndpointId mapping
+    /// * `dns_resolver` - Answers DNS queries sent to [`MAGIC_DNS_ADDR`]
+    ///   over the TUN device (shared with the UDP DNS frontend)
     /// * `to_network_tx` - Channel sender for Packets going to iroh peers
     /// * `from_network_rx` - Channel receiver for Packets coming from iroh peers
     pub fn new(
         registry: Arc<Registry>,
+        dns_resolver: Arc<DnsResolver>,
         to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
         from_network_rx: mpsc::UnboundedReceiver<Packet>,
     ) -> Self {
+        let (dns_tx, dns_rx) = mpsc::unbounded_channel();
         Self {
             registry,
             to_network_tx,
             from_network_rx,
+            dns_resolver,
+            dns_rx,
+            dns_tx,
         }
     }
 
@@ -108,6 +123,11 @@ impl PacketRouter {
                         debug!("Successfully wrote packet to TUN");
                     }
                 }
+                Some(packet) = self.dns_rx.recv() => {
+                    if let Err(e) = outgoing.send(packet).await {
+                        error!("Failed to write DNS response to TUN: {}", e);
+                    }
+                }
             }
         }
     }
@@ -145,6 +165,31 @@ impl PacketRouter {
         let ipv6_header = Ipv6Header::from_slice(packet).context("Failed to parse IPv6 header")?;
 
         let dest_addr = ipv6_header.0.destination_addr();
+
+        if dest_addr == MAGIC_DNS_ADDR
+            && ipv6_header.0.next_header == etherparse::IpNumber::UDP
+            && let Ok((udp, payload)) = UdpHeader::from_slice(ipv6_header.1)
+            && udp.destination_port == 53
+        {
+            let payload = payload.to_vec();
+            let source = ipv6_header.0.source_addr();
+            let source_port = udp.source_port;
+            let resolver = Arc::clone(&self.dns_resolver);
+            let tx = self.dns_tx.clone();
+            tokio::spawn(async move {
+                if let Some(reply) = resolver.resolve(&payload).await {
+                    let mut packet = Vec::with_capacity(40 + 8 + reply.len());
+                    if PacketBuilder::ipv6(MAGIC_DNS_ADDR.octets(), source.octets(), 64)
+                        .udp(53, source_port)
+                        .write(&mut packet, &reply)
+                        .is_ok()
+                    {
+                        let _ = tx.send(packet);
+                    }
+                }
+            });
+            return Ok(());
+        }
 
         // Filter out multicast packets (ff00::/8)
         // These are broadcast packets (MLD, mDNS, etc.) that don't have specific destinations
@@ -236,14 +281,14 @@ impl PacketRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::test_endpoint_id;
+    use crate::test_utils::{test_endpoint_id, test_resolver};
 
     #[test]
     fn test_packet_router_new() {
         let registry = Arc::new(Registry::new());
         let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let _router = PacketRouter::new(registry, to_network_tx, from_network_rx);
+        let _router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
         // Just verify it constructs
     }
 
@@ -257,7 +302,12 @@ mod tests {
 
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let router = PacketRouter::new(Arc::clone(&registry), to_network_tx, from_network_rx);
+        let router = PacketRouter::new(
+            Arc::clone(&registry),
+            test_resolver(),
+            to_network_tx,
+            from_network_rx,
+        );
 
         // Create a minimal IPv6 packet
         // IPv6 header: 40 bytes
@@ -302,7 +352,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let router = PacketRouter::new(registry, to_network_tx, from_network_rx);
+        let router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
 
         // Create IPv6 packet with unknown destination
         let mut packet = vec![0u8; 40];
@@ -336,7 +386,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let router = PacketRouter::new(registry, to_network_tx, from_network_rx);
+        let router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
 
         // Invalid packet (too short, version 0)
         let packet = vec![0u8; 10];
@@ -361,24 +411,14 @@ mod tests {
 
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-        let router = PacketRouter::new(Arc::clone(&registry), to_network_tx, from_network_rx);
+        let router = PacketRouter::new(
+            Arc::clone(&registry),
+            test_resolver(),
+            to_network_tx,
+            from_network_rx,
+        );
 
-        // Fake TUN: incoming packets from a channel, outgoing packets into a channel
-        let (os_tx, os_rx) = mpsc::unbounded_channel::<std::io::Result<Vec<u8>>>();
-        let (tun_written_tx, mut tun_written_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-
-        let incoming = Box::pin(futures::stream::unfold(os_rx, |mut rx| async move {
-            rx.recv().await.map(|packet| (packet, rx))
-        }));
-        let outgoing = Box::pin(futures::sink::unfold(
-            tun_written_tx,
-            |tx, packet: Vec<u8>| async move {
-                tx.send(packet).unwrap();
-                Ok::<_, std::io::Error>(tx)
-            },
-        ));
-
-        let io = TunIo { incoming, outgoing };
+        let (io, os_tx, mut tun_written_rx) = fake_tun();
         let handle = tokio::spawn(router.run(io));
 
         // OS → Network
@@ -399,6 +439,108 @@ mod tests {
         let written = tun_written_rx.recv().await.unwrap();
         assert_eq!(written, packet);
 
+        handle.abort();
+    }
+
+    /// Feeds packets into a fake TUN's `incoming` stream ("the OS sends").
+    type OsSender = mpsc::UnboundedSender<std::io::Result<Vec<u8>>>;
+
+    /// Fake TUN device backed by channels, so the run loop can be tested
+    /// without root: returns the `TunIo`, a sender that injects packets as
+    /// if written by the OS, and a receiver of packets the router wrote.
+    fn fake_tun() -> (TunIo, OsSender, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (os_tx, os_rx) = mpsc::unbounded_channel::<std::io::Result<Vec<u8>>>();
+        let (written_tx, written_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let incoming = Box::pin(futures::stream::unfold(os_rx, |mut rx| async move {
+            rx.recv().await.map(|packet| (packet, rx))
+        }));
+        let outgoing = Box::pin(futures::sink::unfold(
+            written_tx,
+            |tx, packet: Vec<u8>| async move {
+                tx.send(packet).unwrap();
+                Ok::<_, std::io::Error>(tx)
+            },
+        ));
+        (TunIo { incoming, outgoing }, os_tx, written_rx)
+    }
+
+    /// A DNS query sent over the TUN to the magic address is answered by the
+    /// router with a well-formed IPv6/UDP response, and never reaches iroh.
+    #[tokio::test]
+    async fn test_run_answers_dns_over_tun() {
+        use hickory_proto::op::{Message, Query};
+        use hickory_proto::rr::{Name, RData, RecordType};
+        use std::str::FromStr;
+
+        let registry = Arc::new(Registry::new());
+        let resolver = Arc::new(DnsResolver::new(Arc::clone(&registry), vec![]));
+        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
+        let router = PacketRouter::new(registry, resolver, to_network_tx, from_network_rx);
+        let (io, os_tx, mut tun_written_rx) = fake_tun();
+        let handle = tokio::spawn(router.run(io));
+
+        // App at fd69:726f::1234 port 40000 asks the magic DNS server
+        let peer = test_endpoint_id(11);
+        let domain = format!(
+            "{}.iron.",
+            data_encoding::BASE32_NOPAD
+                .encode(peer.as_bytes())
+                .to_lowercase()
+        );
+        let mut query = Message::new();
+        query.set_id(0x5151);
+        query.add_query(Query::query(
+            Name::from_str(&domain).unwrap(),
+            RecordType::AAAA,
+        ));
+        let app_addr: std::net::Ipv6Addr = "fd69:726f::1234".parse().unwrap();
+        let mut packet = Vec::new();
+        PacketBuilder::ipv6(app_addr.octets(), MAGIC_DNS_ADDR.octets(), 64)
+            .udp(40000, 53)
+            .write(&mut packet, &query.to_vec().unwrap())
+            .unwrap();
+        os_tx.send(Ok(packet)).unwrap();
+
+        let written =
+            tokio::time::timeout(std::time::Duration::from_secs(2), tun_written_rx.recv())
+                .await
+                .expect("DNS response written to TUN")
+                .unwrap();
+
+        // Addressed back to the app, from the magic address, valid checksum
+        let parsed = etherparse::SlicedPacket::from_ip(&written).unwrap();
+        let Some(etherparse::NetSlice::Ipv6(ip)) = &parsed.net else {
+            panic!("expected IPv6");
+        };
+        assert_eq!(ip.header().source_addr(), MAGIC_DNS_ADDR);
+        assert_eq!(ip.header().destination_addr(), app_addr);
+        let Some(etherparse::TransportSlice::Udp(udp)) = &parsed.transport else {
+            panic!("expected UDP");
+        };
+        assert_eq!((udp.source_port(), udp.destination_port()), (53, 40000));
+        let expected_checksum = udp
+            .to_header()
+            .calc_checksum_ipv6(&ip.header().to_header(), udp.payload())
+            .unwrap();
+        assert_eq!(
+            udp.checksum(),
+            expected_checksum,
+            "UDP checksum must be valid"
+        );
+
+        // DNS payload answers with the peer's derived address
+        let reply = Message::from_vec(udp.payload()).unwrap();
+        assert_eq!(reply.id(), 0x5151);
+        assert_eq!(
+            reply.answers()[0].data(),
+            &RData::AAAA(Registry::derive_ip(peer).into())
+        );
+
+        assert!(
+            to_network_rx.try_recv().is_err(),
+            "DNS must not be sent to iroh"
+        );
         handle.abort();
     }
 }

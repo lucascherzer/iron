@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-use iron_core::test_utils::test_endpoint_id;
+use iron_core::test_utils::{test_endpoint_id, test_resolver};
 
 /// Test that Registry provides consistent mappings across all components
 #[tokio::test]
@@ -107,7 +107,12 @@ async fn test_tun_os_to_network_packet_flow() {
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
 
     // Create packet router
-    let router = PacketRouter::new(Arc::clone(&registry), to_network_tx, from_network_rx);
+    let router = PacketRouter::new(
+        Arc::clone(&registry),
+        test_resolver(),
+        to_network_tx,
+        from_network_rx,
+    );
 
     // Create minimal IPv6 packet
     let mut packet = vec![0u8; 40];
@@ -179,7 +184,12 @@ async fn test_simulated_packet_flow_node_a_to_b() {
 
     let (to_network_tx_a, mut to_network_rx_a) = mpsc::unbounded_channel();
     let (_from_network_tx_a, from_network_rx_a) = mpsc::unbounded_channel();
-    let router_a = PacketRouter::new(Arc::clone(&registry_a), to_network_tx_a, from_network_rx_a);
+    let router_a = PacketRouter::new(
+        Arc::clone(&registry_a),
+        test_resolver(),
+        to_network_tx_a,
+        from_network_rx_a,
+    );
 
     // Setup Node B
     let registry_b = Arc::new(Registry::new());
@@ -188,7 +198,12 @@ async fn test_simulated_packet_flow_node_a_to_b() {
 
     let (_to_network_tx_b, _to_network_rx_b) = mpsc::unbounded_channel();
     let (from_network_tx_b, from_network_rx_b) = mpsc::unbounded_channel();
-    let _router_b = PacketRouter::new(Arc::clone(&registry_b), _to_network_tx_b, from_network_rx_b);
+    let _router_b = PacketRouter::new(
+        Arc::clone(&registry_b),
+        test_resolver(),
+        _to_network_tx_b,
+        from_network_rx_b,
+    );
 
     // IMPORTANT: Node A needs to know about Node B before sending
     // (In real scenario, this happens via DNS resolution)
@@ -244,7 +259,7 @@ async fn test_packet_to_unregistered_destination() {
 
     let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
-    let router = PacketRouter::new(registry, to_network_tx, from_network_rx);
+    let router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
 
     // Create packet to unknown destination
     let mut packet = vec![0u8; 40];
@@ -281,7 +296,7 @@ async fn test_packet_to_unregistered_destination() {
 #[tokio::test]
 async fn test_dns_resolver_construction() {
     let registry = Arc::new(Registry::new());
-    let _resolver = DnsResolver::new(registry);
+    let _resolver = DnsResolver::new(registry, vec![]);
     // Just verify it constructs without panicking
 }
 
@@ -317,6 +332,7 @@ async fn test_concurrent_packet_processing() {
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
     let router = Arc::new(PacketRouter::new(
         Arc::clone(&registry),
+        test_resolver(),
         to_network_tx,
         from_network_rx,
     ));
@@ -370,7 +386,7 @@ fn test_tun_interface_public_api() {
     let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
 
-    let _router = PacketRouter::new(registry, to_network_tx, from_network_rx);
+    let _router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
     // Verify constructor is public and accessible
 }
 

@@ -37,6 +37,9 @@
   `pkgsCross.aarch64-android-prebuilt` (unfree, own nixpkgs instance).
 - Next: validate the desktop build on real Linux/macOS machines before
   starting Android-specific work.
+- DNS-over-TUN interception and upstream forwarding are complete. The tunnel
+  DNS address is `fd69:726f:0:1::53`; non-`.iron` queries can use configured
+  UDP upstreams.
 
 ## Recent Updates (Jan 21, 2026)
 

@@ -9,7 +9,6 @@ edition.workspace = true
 # iron-desktop. See the crate docs in src/lib.rs.
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 data-encoding.workspace = true
 dashmap.workspace = true
 etherparse.workspace = true
@@ -17,7 +16,6 @@ futures.workspace = true
 hex.workspace = true
 hickory-client.workspace = true
 hickory-proto.workspace = true
-hickory-server.workspace = true
 iroh.workspace = true
 postcard.workspace = true
 rand.workspace = true

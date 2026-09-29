@@ -104,7 +104,10 @@ details are especially worth carrying over:
    (`nix build .#checks.<system>.iron-core-android`). Note that even without
    linking this needs the NDK's C toolchain: ring compiles C in its build
    script. The flake takes it from `pkgsCross.aarch64-android-prebuilt`.
-3. Implement DNS-over-TUN interception and upstream forwarding.
+3. ✅ Implement DNS-over-TUN interception and upstream forwarding in
+   `iron-core`. The magic address is `fd69:726f:0:1::53` (UDP/53). It is
+   collision-free because registry peer addresses are always
+   `fd69:726f:0:0:...`, leaving the `:0:1:` subnet unused.
 4. Build the Android `cdylib` (using UniFFI) and Kotlin `VpnService`
    application.
 

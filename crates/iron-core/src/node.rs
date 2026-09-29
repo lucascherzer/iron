@@ -24,6 +24,8 @@ pub struct NodeConfig {
     pub paths: StatePaths,
     /// Address the UDP DNS frontend listens on.
     pub dns_listen: SocketAddr,
+    /// Upstream DNS servers for non-`.iron` queries; empty refuses them.
+    pub dns_upstream: Vec<SocketAddr>,
     /// Provisions the TUN device and exposes its packet I/O.
     pub tun: Box<dyn TunBackend>,
 }
@@ -39,7 +41,7 @@ impl NodeConfig {
 pub struct IronNode {
     registry: Arc<Registry>,
     endpoint: Endpoint,
-    dns: DnsResolver,
+    dns: Arc<DnsResolver>,
     dns_listen: SocketAddr,
     router: PacketRouter,
     protocol: IronProtocol,
@@ -70,6 +72,7 @@ impl IronNode {
         let NodeConfig {
             paths,
             dns_listen,
+            dns_upstream,
             tun,
         } = config;
 
@@ -109,11 +112,16 @@ impl IronNode {
 
         // Initialize DNS resolver
         info!("Creating DNS resolver");
-        let dns = DnsResolver::new(registry.clone());
+        let dns = Arc::new(DnsResolver::new(registry.clone(), dns_upstream));
 
         // Initialize packet router
         info!("Creating packet router");
-        let router = PacketRouter::new(registry.clone(), to_network_tx, from_network_rx);
+        let router = PacketRouter::new(
+            registry.clone(),
+            Arc::clone(&dns),
+            to_network_tx,
+            from_network_rx,
+        );
 
         // Initialize protocol handler
         info!("Creating protocol handler");
@@ -174,7 +182,7 @@ impl IronNode {
         let dns = self.dns;
         let dns_listen = self.dns_listen;
         let dns_handle = tokio::spawn(async move {
-            if let Err(e) = dns.run(dns_listen).await {
+            if let Err(e) = crate::dns::serve_udp(dns, dns_listen).await {
                 error!("DNS resolver failed: {}", e);
             }
         });

@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iron_core::IronNode;
 use iron_desktop::dns_config;
+use std::net::SocketAddr;
 use tracing::{error, info};
 
 mod commands;
@@ -24,6 +25,10 @@ struct Cli {
     /// DNS server port (default: 5333)
     #[arg(long, default_value = "5333", global = true)]
     dns_port: u16,
+
+    /// Upstream DNS server (repeatable, e.g. 1.1.1.1:53)
+    #[arg(long, value_name = "ADDR", global = true)]
+    dns_upstream: Vec<SocketAddr>,
 
     /// Remove DNS configuration for .iron domains (manual cleanup)
     #[arg(long)]
@@ -207,7 +212,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Serve) => {
             // Start daemon
-            start_daemon(cli.log_level, cli.dns_port).await?;
+            start_daemon(cli.log_level, cli.dns_port, cli.dns_upstream).await?;
         }
         Some(Command::Convert { value, to }) => {
             commands::convert::run(value, to)?;
@@ -274,9 +279,13 @@ async fn main() -> Result<()> {
 }
 
 /// Start the iron daemon (default behavior)
-async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
+async fn start_daemon(
+    log_level: String,
+    dns_port: u16,
+    dns_upstream: Vec<SocketAddr>,
+) -> Result<()> {
     // Display banner
-    print_banner(&log_level, dns_port);
+    print_banner(&log_level, dns_port, &dns_upstream);
 
     // Check if running as root (required for TUN device)
     #[cfg(unix)]
@@ -291,7 +300,8 @@ async fn start_daemon(log_level: String, dns_port: u16) -> Result<()> {
 
     // Initialize and start iron node with desktop platform defaults
     info!("Initializing iron node...");
-    let config = iron_desktop::desktop_node_config()?.with_dns_port(dns_port);
+    let mut config = iron_desktop::desktop_node_config()?.with_dns_port(dns_port);
+    config.dns_upstream = dns_upstream;
     let state_paths = config.paths.clone();
     let node = IronNode::new(config).await?;
 
@@ -450,7 +460,7 @@ fn init_tracing(log_level: &str) -> Result<()> {
 }
 
 /// Print startup banner with basic information
-fn print_banner(log_level: &str, dns_port: u16) {
+fn print_banner(log_level: &str, dns_port: u16, dns_upstream: &[SocketAddr]) {
     println!("┌─────────────────────────────────────────┐");
     println!("│          iron - P2P Network             │");
     println!("│   Peer-to-peer connectivity via iroh    │");
@@ -459,6 +469,13 @@ fn print_banner(log_level: &str, dns_port: u16) {
     println!("Configuration:");
     println!("  Log level:  {}", log_level);
     println!("  DNS port:   {}", dns_port);
+    println!("  Tunnel DNS: [{}]:53", iron_core::dns::MAGIC_DNS_ADDR);
+    if dns_upstream.is_empty() {
+        println!("  Upstream:   none (non-.iron queries refused)");
+    } else {
+        let upstream: Vec<String> = dns_upstream.iter().map(ToString::to_string).collect();
+        println!("  Upstream:   {}", upstream.join(", "));
+    }
     println!();
 }
 

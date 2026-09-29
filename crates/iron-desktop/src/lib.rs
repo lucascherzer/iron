@@ -21,6 +21,7 @@ pub fn desktop_node_config() -> Result<NodeConfig> {
     Ok(NodeConfig {
         paths: StatePaths::default_os()?,
         dns_listen: SocketAddr::from(([127, 0, 0, 1], 5333)),
+        dns_upstream: vec![],
         tun: Box::new(DesktopTun),
     })
 }
