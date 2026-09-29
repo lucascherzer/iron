@@ -300,7 +300,7 @@ mod tests {
         let endpoint_id = test_endpoint_id(42);
 
         // Get the IPv6 for this endpoint
-        let dest_ip = registry.get_or_assign_ip(endpoint_id);
+        let dest_ip = registry.register(endpoint_id);
 
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
@@ -409,7 +409,7 @@ mod tests {
     async fn test_run_routes_packets_through_tun_io() {
         let registry = Arc::new(Registry::new());
         let endpoint_id = test_endpoint_id(7);
-        let dest_ip = registry.get_or_assign_ip(endpoint_id);
+        let dest_ip = registry.register(endpoint_id);
 
         let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
         let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();

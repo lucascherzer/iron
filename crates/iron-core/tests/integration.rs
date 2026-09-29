@@ -28,23 +28,23 @@ async fn test_registry_consistency_across_components() {
     let endpoint_b = test_endpoint_id(2);
 
     // DNS component gets IPv6 for endpoint_a
-    let ipv6_a_from_dns = registry.get_or_assign_ip(endpoint_a);
+    let ipv6_a_from_dns = registry.register(endpoint_a);
 
     // TUN component does reverse lookup
     let endpoint_a_from_tun = registry.get_endpoint_id(&ipv6_a_from_dns);
     assert_eq!(endpoint_a_from_tun, Some(endpoint_a));
 
     // Second call should return same IPv6
-    let ipv6_a_again = registry.get_or_assign_ip(endpoint_a);
+    let ipv6_a_again = registry.register(endpoint_a);
     assert_eq!(ipv6_a_from_dns, ipv6_a_again);
 
     // Different endpoint should get different IPv6
-    let ipv6_b = registry.get_or_assign_ip(endpoint_b);
+    let ipv6_b = registry.register(endpoint_b);
     assert_ne!(ipv6_a_from_dns, ipv6_b);
 
     // Verify deterministic derivation (same input = same output)
     let registry2 = Arc::new(Registry::new());
-    let ipv6_a_from_registry2 = registry2.get_or_assign_ip(endpoint_a);
+    let ipv6_a_from_registry2 = registry2.register(endpoint_a);
     assert_eq!(ipv6_a_from_dns, ipv6_a_from_registry2);
 }
 
@@ -59,10 +59,7 @@ async fn test_dns_resolution_base32_encoding() {
     let decoded = iron_core::id::parse_domain(&domain).expect("valid .iron domain");
 
     assert_eq!(decoded, endpoint_id);
-    assert_eq!(
-        registry.get_or_assign_ip(decoded),
-        registry.get_or_assign_ip(endpoint_id)
-    );
+    assert_eq!(registry.register(decoded), registry.register(endpoint_id));
 }
 
 /// Test TUN packet processing (OS → Network direction)
@@ -72,7 +69,7 @@ async fn test_tun_os_to_network_packet_flow() {
     let endpoint_id = test_endpoint_id(42);
 
     // Register endpoint and get IPv6
-    let dest_ipv6 = registry.get_or_assign_ip(endpoint_id);
+    let dest_ipv6 = registry.register(endpoint_id);
 
     // Create channels
     let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
@@ -122,16 +119,16 @@ async fn test_two_node_setup() {
     // Node A setup
     let registry_a = Arc::new(Registry::new());
     let endpoint_a = test_endpoint_id(1);
-    let ipv6_a = registry_a.get_or_assign_ip(endpoint_a);
+    let ipv6_a = registry_a.register(endpoint_a);
 
     // Node B setup
     let registry_b = Arc::new(Registry::new());
     let endpoint_b = test_endpoint_id(2);
-    let ipv6_b = registry_b.get_or_assign_ip(endpoint_b);
+    let ipv6_b = registry_b.register(endpoint_b);
 
     // Verify deterministic mapping (both nodes agree on IPv6 for same EndpointId)
-    let ipv6_b_from_a = registry_a.get_or_assign_ip(endpoint_b);
-    let ipv6_a_from_b = registry_b.get_or_assign_ip(endpoint_a);
+    let ipv6_b_from_a = registry_a.register(endpoint_b);
+    let ipv6_a_from_b = registry_b.register(endpoint_a);
 
     assert_eq!(
         ipv6_b, ipv6_b_from_a,
@@ -152,7 +149,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     // Setup Node A
     let registry_a = Arc::new(Registry::new());
     let endpoint_a = test_endpoint_id(1);
-    let _ipv6_a = registry_a.get_or_assign_ip(endpoint_a);
+    let _ipv6_a = registry_a.register(endpoint_a);
 
     let (to_network_tx_a, mut to_network_rx_a) = mpsc::unbounded_channel();
     let (_from_network_tx_a, from_network_rx_a) = mpsc::unbounded_channel();
@@ -166,7 +163,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     // Setup Node B
     let registry_b = Arc::new(Registry::new());
     let endpoint_b = test_endpoint_id(2);
-    let ipv6_b = registry_b.get_or_assign_ip(endpoint_b);
+    let ipv6_b = registry_b.register(endpoint_b);
 
     let (_to_network_tx_b, _to_network_rx_b) = mpsc::unbounded_channel();
     let (from_network_tx_b, from_network_rx_b) = mpsc::unbounded_channel();
@@ -180,7 +177,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     // IMPORTANT: Node A needs to know about Node B before sending
     // (In real scenario, this happens via DNS resolution)
     // Node A does DNS lookup for endpoint_b, which registers it
-    let ipv6_b_from_a = registry_a.get_or_assign_ip(endpoint_b);
+    let ipv6_b_from_a = registry_a.register(endpoint_b);
     assert_eq!(ipv6_b, ipv6_b_from_a, "Deterministic mapping");
 
     // Node A wants to send packet to Node B
@@ -278,7 +275,7 @@ fn test_ipv6_prefix_consistency() {
     let registry = Registry::new();
     let endpoint = test_endpoint_id(42);
 
-    let ipv6 = registry.get_or_assign_ip(endpoint);
+    let ipv6 = registry.register(endpoint);
 
     // Verify it's in our ULA range: fd69:726f::/32
     let octets = ipv6.octets();
@@ -295,10 +292,7 @@ async fn test_concurrent_packet_processing() {
 
     // Pre-register multiple endpoints
     let endpoints: Vec<_> = (0..10).map(test_endpoint_id).collect();
-    let ipv6s: Vec<_> = endpoints
-        .iter()
-        .map(|e| registry.get_or_assign_ip(*e))
-        .collect();
+    let ipv6s: Vec<_> = endpoints.iter().map(|e| registry.register(*e)).collect();
 
     let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
@@ -417,8 +411,8 @@ fn test_key_persistence_produces_consistent_ipv6() {
     let endpoint_id = key.public();
 
     // Both registries should produce same IPv6 for same EndpointId
-    let ipv6_1 = registry1.get_or_assign_ip(endpoint_id);
-    let ipv6_2 = registry2.get_or_assign_ip(endpoint_id);
+    let ipv6_1 = registry1.register(endpoint_id);
+    let ipv6_2 = registry2.register(endpoint_id);
 
     assert_eq!(
         ipv6_1, ipv6_2,
@@ -438,8 +432,8 @@ fn test_different_keys_produce_different_ipv6() {
     let endpoint_id1 = key1.public();
     let endpoint_id2 = key2.public();
 
-    let ipv6_1 = registry.get_or_assign_ip(endpoint_id1);
-    let ipv6_2 = registry.get_or_assign_ip(endpoint_id2);
+    let ipv6_1 = registry.register(endpoint_id1);
+    let ipv6_2 = registry.register(endpoint_id2);
 
     assert_ne!(
         ipv6_1, ipv6_2,
@@ -515,7 +509,7 @@ async fn test_e2e_key_persistence_to_ipv6_mapping() {
     // Create registry and get IPv6
     let registry1 = Arc::new(Registry::new());
     let endpoint_id1 = key1.public();
-    let ipv6_1 = registry1.get_or_assign_ip(endpoint_id1);
+    let ipv6_1 = registry1.register(endpoint_id1);
 
     // === Second "run" (simulated restart) ===
 
@@ -526,7 +520,7 @@ async fn test_e2e_key_persistence_to_ipv6_mapping() {
     // Create new registry (clean state)
     let registry2 = Arc::new(Registry::new());
     let endpoint_id2 = key2.public();
-    let ipv6_2 = registry2.get_or_assign_ip(endpoint_id2);
+    let ipv6_2 = registry2.register(endpoint_id2);
 
     // === Verification ===
 

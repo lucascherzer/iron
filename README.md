@@ -336,7 +336,8 @@ cargo doc --open --no-deps
 ### Components
 
 - `keys.rs`: persistent identity storage and generation
-- `mapping.rs`: bidirectional EndpointId to IPv6 mapping
+- `id.rs`: node ID forms (base32, `.iron` domain, derived IPv6)
+- `mapping.rs`: registry of known peers by derived IPv6 (for routing)
 - `dns.rs`: message-level resolver for `.iron` domains (UDP frontend + DNS-over-TUN, optional upstream forwarding)
 - `dns_config.rs`: auto-configuration for system DNS
 - `tun.rs`: virtual network device for packet interception

@@ -175,7 +175,7 @@ impl DnsResolver {
 
         match crate::id::parse_domain(&name.to_string()) {
             Some(endpoint_id) => {
-                let ip = self.registry.get_or_assign_ip(endpoint_id);
+                let ip = self.registry.register(endpoint_id);
                 debug!("Resolved {} -> {}", name, ip);
                 let record =
                     Record::from_rdata(name.clone(), IRON_RECORD_TTL, RData::AAAA(ip.into()));

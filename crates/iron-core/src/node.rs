@@ -100,8 +100,10 @@ impl IronNode {
 
         info!("Iroh endpoint created: {}", endpoint.id());
 
-        // Get this node's derived IPv6 address (populates the registry)
-        let node_ipv6 = registry.get_or_assign_ip(endpoint.id());
+        // This node's own address. Registering ourselves (as before) means a
+        // packet to our own address reaches the protocol's loopback check
+        // instead of being dropped as an unknown destination.
+        let node_ipv6 = registry.register(endpoint.id());
         info!("Node IPv6 address: {}", node_ipv6);
 
         // Create channels for packet flow
@@ -175,7 +177,7 @@ impl IronNode {
 
         // Provision the TUN device first: without it there is no data plane,
         // so failing fast beats running a node that cannot carry traffic.
-        let node_ipv6 = self.registry.get_or_assign_ip(self.endpoint.id());
+        let node_ipv6 = crate::id::derive_ip(&self.endpoint.id());
         let tun_io = self.tun.open(node_ipv6)?;
 
         // Run DNS, router and protocol concurrently. They are all meant to

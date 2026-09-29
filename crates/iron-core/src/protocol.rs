@@ -352,7 +352,7 @@ impl IronProtocol {
             Ipv6Header::from_slice(&packet).context("Failed to parse IPv6 header")?;
 
         // Get sender's derived IPv6
-        let sender_ipv6 = registry.get_or_assign_ip(*sender_id);
+        let sender_ipv6 = registry.register(*sender_id);
 
         // Rewrite source address
         let mut header = ipv6_header;
@@ -421,7 +421,7 @@ mod tests {
     fn test_rewrite_source_address_valid_packet() {
         let registry = Arc::new(Registry::new());
         let sender_id = test_endpoint_id(42);
-        let expected_sender_ipv6 = registry.get_or_assign_ip(sender_id);
+        let expected_sender_ipv6 = registry.register(sender_id);
 
         // Create packet with arbitrary source/destination
         let original_src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
@@ -541,8 +541,8 @@ mod tests {
         let sender1 = test_endpoint_id(10);
         let sender2 = test_endpoint_id(20);
 
-        let expected_ipv6_1 = registry.get_or_assign_ip(sender1);
-        let expected_ipv6_2 = registry.get_or_assign_ip(sender2);
+        let expected_ipv6_1 = registry.register(sender1);
+        let expected_ipv6_2 = registry.register(sender2);
 
         // Create same packet structure
         let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
@@ -601,7 +601,7 @@ mod tests {
     fn test_rewrite_source_address_idempotent() {
         let registry = Arc::new(Registry::new());
         let sender_id = test_endpoint_id(88);
-        let sender_ipv6 = registry.get_or_assign_ip(sender_id);
+        let sender_ipv6 = registry.register(sender_id);
 
         let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
         let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
@@ -811,7 +811,7 @@ mod tests {
         let sender = test_endpoint_id(123);
 
         // Pre-register the sender in registry
-        let pre_registered_ipv6 = registry.get_or_assign_ip(sender);
+        let pre_registered_ipv6 = registry.register(sender);
 
         let src = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 1);
         let dst = Ipv6Addr::new(0xfd69, 0x726f, 0, 0, 0, 0, 0, 2);
@@ -829,7 +829,7 @@ mod tests {
         );
 
         // Verify it's still in the registry and consistent
-        let post_rewrite_ipv6 = registry.get_or_assign_ip(sender);
+        let post_rewrite_ipv6 = registry.register(sender);
         assert_eq!(
             pre_registered_ipv6, post_rewrite_ipv6,
             "Registry mapping should remain consistent"
