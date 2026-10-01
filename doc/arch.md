@@ -208,7 +208,19 @@ router.run(tun_io).await?;
 - Integration tests for packet flow
 - CLI utilities for testing (`iron resolve`, `iron convert`)
 
-**Future**: End-to-end automated testing with virtual networks
+**NixOS VM tests** (`tests/vm/`, Linux-only `nix flake check` outputs
+`iron-vm-*`): three VMs on a virtual LAN, an `infra` VM running
+`iroh-relay` and `iroh-dns-server` (so no internet is needed) and two iron
+nodes running `nixosModules.iron`. The harness and its conventions are
+documented in `tests/vm/lib.nix`. Link faults are injected with `tc netem` on
+the VM LAN interface (`eth1`), below iroh:
+- `two-node`: `.iron` name resolution and TCP in both directions
+- `lossy-network`: a 10 MiB TCP transfer stays intact with 5% loss per direction
+- `outage`: an idle TCP connection survives a 45s blackout (longer than QUIC's
+  30s idle timeout) and carries on afterwards
+
+Run one with `nix build .#checks.x86_64-linux.iron-vm-two-node -L`; for an
+interactive session use its `.driverInteractive` attribute.
 
 ## DNS Auto-Configuration
 **Supported Platforms**:

@@ -51,6 +51,12 @@ sudo iron serve [OPTIONS]
   - Default: `5333`
   - Example: `sudo iron serve --dns-port 5353`
 
+**Serve Options** (self-hosted or offline networks; default: n0's public servers):
+- `--relay-url <URL>`: Relay server to use
+  - Example: `sudo iron serve --relay-url https://relay.example.com`
+- `--pkarr-url <URL>`: pkarr server nodes publish to and resolve peers from
+  - Example: `sudo iron serve --pkarr-url https://dns.example.com/pkarr`
+
 ### Example Output
 
 ```

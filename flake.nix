@@ -131,7 +131,19 @@
             inherit (commonArgs) src;
             inherit advisory-db;
           };
-        };
+        }
+        # NixOS VM tests (tests/vm/). They boot Linux VMs, so they need a
+        # Linux builder with the `nixos-test` and `kvm` features.
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+          let
+            vm = import ./tests/vm/lib.nix { inherit pkgs self; };
+          in
+          {
+            iron-vm-two-node = import ./tests/vm/two-node.nix { lib = vm; };
+            iron-vm-lossy-network = import ./tests/vm/lossy-network.nix { lib = vm; };
+            iron-vm-outage = import ./tests/vm/outage.nix { lib = vm; };
+          }
+        );
 
         # `nix develop`
         devShells.default = craneLib.devShell {
@@ -150,48 +162,6 @@
       }
     ) // {
       # NixOS module for system-wide installation
-      nixosModules.iron = { config, lib, pkgs, ... }:
-        with lib;
-        let
-          cfg = config.services.iron;
-        in {
-          options.services.iron = {
-            enable = mkEnableOption "iron P2P network interface";
-
-            logLevel = mkOption {
-              type = types.str;
-              default = "info";
-              description = "Log level (trace, debug, info, warn, error)";
-            };
-
-            dnsPort = mkOption {
-              type = types.port;
-              default = 5333;
-              description = "DNS server port";
-            };
-          };
-
-          config = mkIf cfg.enable {
-            systemd.services.iron = {
-              description = "iron P2P Network Interface";
-              after = [ "network.target" ];
-              wantedBy = [ "multi-user.target" ];
-
-              serviceConfig = {
-                ExecStart = "${self.packages.${pkgs.system}.iron}/bin/iron serve --log-level ${cfg.logLevel} --dns-port ${toString cfg.dnsPort}";
-                Restart = "on-failure";
-                RestartSec = 5;
-
-                # Security hardening
-                CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
-                AmbientCapabilities = [ "CAP_NET_ADMIN" ];
-                NoNewPrivileges = true;
-                PrivateTmp = true;
-                ProtectSystem = "strict";
-                ProtectHome = true;
-              };
-            };
-          };
-        };
+      nixosModules.iron = import ./nix/module.nix { inherit self; };
     };
 }

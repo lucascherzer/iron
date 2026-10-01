@@ -1,9 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use iron_core::IronNode;
+use iroh::RelayUrl;
+use iron_core::{IrohInfra, IronNode};
 use iron_desktop::dns_config;
 use std::net::SocketAddr;
 use tracing::{error, info, warn};
+use url::Url;
 
 mod commands;
 
@@ -38,7 +40,16 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Start the iron daemon (TUN interface and DNS server)
-    Serve,
+    Serve {
+        /// Relay server to use instead of n0's public relays
+        #[arg(long, value_name = "URL")]
+        relay_url: Option<RelayUrl>,
+
+        /// pkarr server (e.g. http://host:8080/pkarr) to publish to and
+        /// resolve peers from, instead of n0's public DNS servers
+        #[arg(long, value_name = "URL")]
+        pkarr_url: Option<Url>,
+    },
 
     /// Convert between node ID formats (hex, base32, .iron domain, IPv6)
     Convert {
@@ -210,9 +221,15 @@ async fn main() -> Result<()> {
 
     // Handle subcommands
     match cli.command {
-        Some(Command::Serve) => {
-            // Start daemon
-            start_daemon(cli.log_level, cli.dns_port, cli.dns_upstream).await?;
+        Some(Command::Serve {
+            relay_url,
+            pkarr_url,
+        }) => {
+            let infra = IrohInfra {
+                relay_url,
+                pkarr_url,
+            };
+            start_daemon(cli.log_level, cli.dns_port, cli.dns_upstream, infra).await?;
         }
         Some(Command::Convert { value, to }) => {
             commands::convert::run(value, to)?;
@@ -283,6 +300,7 @@ async fn start_daemon(
     log_level: String,
     dns_port: u16,
     dns_upstream: Vec<SocketAddr>,
+    infra: IrohInfra,
 ) -> Result<()> {
     // Display banner
     print_banner(&log_level, dns_port, &dns_upstream);
@@ -302,6 +320,7 @@ async fn start_daemon(
     info!("Initializing iron node...");
     let mut config = iron_desktop::desktop_node_config()?.with_dns_port(dns_port);
     config.dns_upstream = dns_upstream;
+    config.infra = infra;
     let state_paths = config.paths.clone();
     let node = IronNode::new(config).await?;
 

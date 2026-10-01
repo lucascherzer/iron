@@ -6,12 +6,14 @@ use crate::platform::TunBackend;
 use crate::protocol::IronProtocol;
 use crate::router::PacketRouter;
 use anyhow::{Context, Result};
-use iroh::Endpoint;
+use iroh::address_lookup::{PkarrPublisher, PkarrResolver};
 use iroh::endpoint::presets::N0;
+use iroh::{Endpoint, RelayMap, RelayMode, RelayUrl};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use url::Url;
 
 /// Platform-dependent pieces an [`IronNode`] is assembled from.
 ///
@@ -28,6 +30,39 @@ pub struct NodeConfig {
     pub dns_upstream: Vec<SocketAddr>,
     /// Provisions the TUN device and exposes its packet I/O.
     pub tun: Box<dyn TunBackend>,
+    /// Where to find other peers; defaults to n0's public servers.
+    pub infra: IrohInfra,
+}
+
+/// The iroh infrastructure a node relies on to reach peers: a relay server
+/// (fallback path and hole-punching coordination) and a pkarr server where
+/// nodes publish and look up each other's relay URL.
+///
+/// Each `None` falls back to n0's public servers. Overriding them is for
+/// self-hosted or offline networks, e.g. the NixOS VM tests in `tests/vm/`.
+#[derive(Debug, Clone, Default)]
+pub struct IrohInfra {
+    pub relay_url: Option<RelayUrl>,
+    /// pkarr HTTP endpoint, e.g. `http://dns.example:8080/pkarr`.
+    pub pkarr_url: Option<Url>,
+}
+
+impl IrohInfra {
+    /// An endpoint builder using this infrastructure.
+    fn endpoint_builder(&self) -> iroh::endpoint::Builder {
+        let mut builder = Endpoint::builder(N0);
+        if let Some(relay) = &self.relay_url {
+            builder = builder.relay_mode(RelayMode::Custom(RelayMap::from(relay.clone())));
+        }
+        if let Some(pkarr) = &self.pkarr_url {
+            // Replaces all of N0's lookups (pkarr and DNS against iroh.link).
+            builder = builder
+                .clear_address_lookup()
+                .address_lookup(PkarrPublisher::builder(pkarr.clone()))
+                .address_lookup(PkarrResolver::builder(pkarr.clone()));
+        }
+        builder
+    }
 }
 
 impl NodeConfig {
@@ -74,6 +109,7 @@ impl IronNode {
             dns_listen,
             dns_upstream,
             tun,
+            infra,
         } = config;
 
         // Create shared registry
@@ -91,8 +127,9 @@ impl IronNode {
         let secret_key = keys::load_or_generate_key(&paths)?;
 
         // Initialize iroh endpoint with persistent key
-        info!("Creating iroh endpoint");
-        let endpoint = Endpoint::builder(N0)
+        info!("Creating iroh endpoint ({infra:?})");
+        let endpoint = infra
+            .endpoint_builder()
             .secret_key(secret_key)
             .alpns(vec![crate::protocol::ALPN.to_vec()])
             .bind()

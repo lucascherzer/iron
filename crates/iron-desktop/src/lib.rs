@@ -23,12 +23,13 @@ pub fn default_state_paths() -> Result<StatePaths> {
 }
 
 /// Desktop defaults: state in `~/.config/iron`, DNS on `127.0.0.1:5333`,
-/// self-provisioned TUN device.
+/// self-provisioned TUN device, n0's public relay and pkarr servers.
 pub fn desktop_node_config() -> Result<NodeConfig> {
     Ok(NodeConfig {
         paths: default_state_paths()?,
         dns_listen: SocketAddr::from(([127, 0, 0, 1], 5333)),
         dns_upstream: vec![],
         tun: Box::new(DesktopTun),
+        infra: Default::default(),
     })
 }

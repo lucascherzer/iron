@@ -14,7 +14,28 @@
 - 📊 **Test Coverage**: 75 total tests (59 unit tests + 16 integration tests)
 - 🚀 **Packet Abstraction**: Phase 1 complete - type-safe internal architecture ready for future features
 
-## Recent Updates (Sep 17, 2026)
+## Recent Updates (Sep 30, 2026)
+
+### 🚧 NixOS VM test suite (`tests/vm/`)
+- Ported the `tests/vm` branch (pre-workspace-split) onto the current layout:
+  shared harness `tests/vm/lib.nix`, tests `two-node`, `lossy-network` and
+  the new `outage` (blackout longer than QUIC's idle timeout, then the same
+  TCP connection must work). Flake checks `iron-vm-*`, Linux only.
+- Fixed in the old tests: health endpoints (`/healthz`, `/healthcheck`),
+  `pkarr_put_rate_limit` placement, and `tc netem` on `eth0` (QEMU user
+  net; the VM LAN is `eth1`, so the old lossy test lost nothing).
+- `NodeConfig.infra` / `iron serve --relay-url --pkarr-url` select a
+  self-hosted relay and pkarr server (the VMs have no internet).
+- NixOS module moved to `nix/module.nix`; fixed missing `iproute2` on the
+  service `PATH`, state dir (`HOME=/var/lib/iron`, hidden by `ProtectHome`
+  before), and the resolved drop-in dir under `ProtectSystem=strict`. Added
+  `package`, `relayUrl`, `pkarrUrl` options.
+- **Status**: evaluates; not yet run in VMs (needs a builder with the
+  `nixos-test` feature).
+- Next, validated by this suite: lossy (datagram) transport, see branch
+  `feat/lossful-transport`; non-blocking accept/send in `protocol.rs`.
+
+## Previous Updates (Sep 17, 2026)
 
 ### ✅ Platform Seam Extraction - LANDED
 - Landed on `feat/platform-seam`, separating OS-specific concerns from the
