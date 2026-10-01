@@ -14,6 +14,7 @@
 let
   relayPort = 3340;
   pkarrPort = 8080;
+  ironExe = pkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.iron;
 
   infra = { lib, ... }: {
     networking.firewall.enable = false;
@@ -86,19 +87,32 @@ let
     LAN_IF = "eth1"  # eth0 is QEMU user networking; VMs talk over eth1
 
     start_all()
-    infra.wait_for_open_port(${toString relayPort})
-    infra.wait_for_open_port(${toString pkarrPort})
-    infra.succeed("curl -sf http://localhost:${toString relayPort}/healthz")
-    infra.succeed("curl -sf http://localhost:${toString pkarrPort}/healthcheck")
+    for service, url in [
+        ("iroh-relay", "http://localhost:${toString relayPort}/healthz"),
+        ("iroh-dns-server", "http://localhost:${toString pkarrPort}/healthcheck"),
+    ]:
+        try:
+            infra.wait_until_succeeds(
+                f"curl -sf --max-time 2 {url}", timeout=60
+            )
+        except Exception:
+            infra.log(f"--- {service} journal ---")
+            infra.succeed(f"journalctl -u {service} --no-pager")
+            raise
 
     def iron_self(node, flag):
-        return node.succeed(f"HOME=/var/lib/iron iron self --{flag}").strip()
+        return node.succeed(f"HOME=/var/lib/iron ${ironExe} self --{flag}").strip()
 
     for node in [a, b]:
-        node.wait_for_unit("multi-user.target")
+        node.wait_for_unit("multi-user.target", timeout=60)
         node.systemctl("start iron.service")
-        node.wait_for_unit("iron.service")
-        node.wait_until_succeeds("HOME=/var/lib/iron iron self --exists")
+        try:
+            node.wait_for_unit("iron.service", timeout=60)
+            node.wait_until_succeeds("HOME=/var/lib/iron ${ironExe} self --exists", timeout=60)
+        except Exception:
+            node.log("--- iron.service journal ---")
+            node.succeed("journalctl -u iron.service --no-pager")
+            raise
 
     a_ip, b_ip = iron_self(a, "ipv6"), iron_self(b, "ipv6")
     a_domain, b_domain = iron_self(a, "domain"), iron_self(b, "domain")
@@ -107,8 +121,17 @@ let
 
     # Both nodes are reachable once pkarr records are published and the
     # first connection is up.
-    a.wait_until_succeeds(f"ping -c1 -W2 {b_ip}", timeout=120)
-    b.wait_until_succeeds(f"ping -c1 -W2 {a_ip}", timeout=120)
+    try:
+        # Resolve the .iron names first; that is how EndpointIds are learned.
+        a.wait_until_succeeds(f"ping -c1 -W2 {b_domain}", timeout=120)
+        b.wait_until_succeeds(f"ping -c1 -W2 {a_domain}", timeout=120)
+        a.wait_until_succeeds(f"ping -c1 -W2 {b_ip}", timeout=120)
+        b.wait_until_succeeds(f"ping -c1 -W2 {a_ip}", timeout=120)
+    except Exception:
+        for node in [a, b]:
+            node.log("--- iron.service journal ---")
+            node.succeed("journalctl -u iron.service --no-pager")
+        raise
   '';
 in
 {

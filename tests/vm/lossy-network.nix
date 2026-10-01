@@ -10,8 +10,8 @@ lib.mkTest {
     loss = "5%"  # per node and direction
 
     b.succeed("head -c 10M /dev/urandom > /tmp/blob")
-    b.succeed(f"cd /tmp && python3 -m http.server 8000 --bind {b_ip} >/dev/null 2>&1 &")
-    b.wait_for_open_port(8000, addr=b_ip)
+    b.succeed(f"systemd-run --unit=http-server --collect --no-block python3 -m http.server 8000 --bind {b_ip} --directory /tmp")
+    b.wait_for_open_port(8000, addr=b_ip, timeout=30)
 
     for node in [a, b]:
         node.succeed(f"tc qdisc add dev {LAN_IF} root netem loss {loss}")
