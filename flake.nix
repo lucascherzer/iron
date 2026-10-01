@@ -41,6 +41,12 @@
         # Build *just* the cargo dependencies, so we can reuse them
         # This is the key to incremental builds with crane
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        pingPong = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "iron-vm-ping-pong";
+          cargoBuildCommand = "cargo build --release -p iron-vm-ping-pong --bin iron-vm-ping-pong";
+          meta.mainProgram = "iron-vm-ping-pong";
+        });
         # Android C toolchain (NDK clang + bionic sysroot) for the
         # iron-core-android guardrail. `cargo check` doesn't link, but ring
         # (iroh -> rustls) compiles C in its build script, so an Android
@@ -142,6 +148,7 @@
             iron-vm-two-node = import ./tests/vm/two-node.nix { lib = vm; };
             iron-vm-lossy-network = import ./tests/vm/lossy-network.nix { lib = vm; };
             iron-vm-outage = import ./tests/vm/outage.nix { lib = vm; };
+            iron-vm-ping-pong = import ./tests/vm/ping-pong.nix { inherit pkgs self pingPong; };
           }
         );
 

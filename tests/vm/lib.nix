@@ -44,7 +44,9 @@ let
               bind_addr = "0.0.0.0";
               default_soa = "ns1.iroh.test hostmaster.iroh.test 0 10800 3600 604800 3600";
               default_ttl = 30;
-              origins = [ "iroh.test." ];
+              # The server's static authority is rooted at ".", so include it
+              # to provide the SOA record required during startup.
+              origins = [ "iroh.test." "." ];
               rr_a = "127.0.0.1";
               rr_ns = "ns1.iroh.test.";
             };
@@ -110,6 +112,7 @@ let
   '';
 in
 {
+  inherit infra;
   mkTest = { name, testScript }:
     pkgs.testers.runNixOSTest {
       name = "iron-${name}";

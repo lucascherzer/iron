@@ -1,0 +1,10 @@
+[package]
+name = "iron-vm-ping-pong"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+iroh.workspace = true
+tokio.workspace = true
+url.workspace = true

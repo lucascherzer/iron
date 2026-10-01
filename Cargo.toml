@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/iron-core", "crates/iron-desktop", "crates/iron-cli"]
+members = ["crates/iron-core", "crates/iron-desktop", "crates/iron-cli", "tests/vm/ping-pong"]
 resolver = "2"
 
 [workspace.package]
