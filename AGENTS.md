@@ -53,10 +53,6 @@ them before submitting code for review.
 Use `nix flake check` to ensure the repo is in a good state.
 Nix may not be available in zsh, try `/nix/var/nix/profiles/default/bin/nix`.
 
-# Project Management
-Agents persist their status on feature implementation in doc/plan.md in order to
-track progress.
-
 <!-- gortex:communities:start -->
 <!-- gortex:skills:start -->
 ## Community Skills

@@ -212,12 +212,14 @@ router.run(tun_io).await?;
 `iron-vm-*`): three VMs on a virtual LAN, an `infra` VM running
 `iroh-relay` and `iroh-dns-server` (so no internet is needed) and two iron
 nodes running `nixosModules.iron`. The harness and its conventions are
-documented in `tests/vm/lib.nix`. Link faults are injected with `tc netem` on
+documented in `tests/vm/README.md`. Link faults are injected with `tc netem` on
 the VM LAN interface (`eth1`), below iroh:
 - `two-node`: `.iron` name resolution and TCP in both directions
 - `lossy-network`: a 10 MiB TCP transfer stays intact with 5% loss per direction
-- `outage`: an idle TCP connection survives a 45s blackout (longer than QUIC's
-  30s idle timeout) and carries on afterwards
+- `outage`: the same TCP connection carries new data after a 45s blackout;
+  this does not independently assert QUIC expiry or reconnection
+- `ping-pong`: isolated iroh discovery by EndpointId and a ping/pong exchange,
+  using the same local infrastructure but no iron daemon or TUN
 
 Run one with `nix build .#checks.x86_64-linux.iron-vm-two-node -L`; for an
 interactive session use its `.driverInteractive` attribute.
