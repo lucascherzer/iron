@@ -42,20 +42,106 @@ sudo iron serve [OPTIONS]
 ```
 
 **Global Options**:
+- `--config <PATH>`: Load the specified TOML configuration file. A missing
+  explicitly selected file is an error.
+- `--no-config`: Skip configuration-file loading. This does not disable
+  environment variables or command-line options.
+- `--key-file <PATH>`: Select the persistent secret key file.
+- `--state-file <PATH>`: Select the local application-state database.
 - `--log-level <LEVEL>`: Set logging level
   - Values: `trace`, `debug`, `info`, `warn`, `error`
   - Default: `info`
   - Example: `sudo iron serve --log-level debug`
-
 - `--dns-port <PORT>`: Custom DNS server port
   - Default: `5333`
   - Example: `sudo iron serve --dns-port 5353`
+- `--dns-upstream <ADDR>`: Add a DNS upstream socket address; repeat to
+  specify multiple addresses. The supplied list replaces lower layers.
+- `--pkarr-server <URL>`: Select an optional pkarr server.
+- `--default-relays[=false]`: Enable or disable iroh's default relay set.
+- `--relay-server <URL>`: Set the custom relay list; repeat for multiple relays.
+  This replaces the custom list from lower layers, not the built-in relay set.
+  To clear a list set by the file, use the environment (`IRON_IROH_RELAY_SERVERS=[]`).
 
-**Serve Options** (self-hosted or offline networks; default: n0's public servers):
-- `--relay-url <URL>`: Relay server to use
-  - Example: `sudo iron serve --relay-url https://relay.example.com`
-- `--pkarr-url <URL>`: pkarr server nodes publish to and resolve peers from
-  - Example: `sudo iron serve --pkarr-url https://dns.example.com/pkarr`
+### Configuration
+
+Settings are applied in this order, with later sources overriding earlier
+ones: built-in/platform defaults, TOML, `IRON_*` environment, and CLI flags.
+An implicit default config file may be absent. `--config` explicitly selects a
+required file, while `--no-config` skips only TOML loading.
+
+`convert`, `resolve` and `--cleanup-dns` don't use settings and never load
+configuration, so a broken config file or environment can't block them (notably
+the DNS cleanup recovery path). All other commands fail on invalid configuration.
+
+The default config and state locations are:
+
+| Platform | Configuration | Secret key | Application state |
+| --- | --- | --- | --- |
+| Linux | `/etc/iron/config.toml` | `/var/lib/iron/secret.key` | `/var/lib/iron/state.db` |
+| macOS | `/Library/Application Support/iron/config.toml` | `/Library/Application Support/iron/secret.key` | `/Library/Application Support/iron/state.db` |
+
+Configuration TOML:
+
+```toml
+key_file = "/var/lib/iron/secret.key"
+state_file = "/var/lib/iron/state.db"
+log_level = "info"
+dns_port = 5333
+dns_upstream = ["1.1.1.1:53", "[2606:4700:4700::1111]:53"]
+
+[iroh]
+pkarr_server = "https://example.invalid"
+default_relays = true
+relay_servers = ["https://relay.example.invalid"]
+```
+
+`dns_upstream` defaults to an empty list. `pkarr_server` is optional. Custom
+relay URLs are added to the default relay set when `default_relays = true`;
+with it disabled, at least one custom relay must be supplied. Normal iroh
+direct connection and fallback behavior is unchanged.
+
+The corresponding environment variables are:
+
+| Variable | Value |
+| --- | --- |
+| `IRON_CONFIG` | Configuration file path |
+| `IRON_KEY_FILE` | Key file path |
+| `IRON_STATE_FILE` | Local application-state database path |
+| `IRON_LOG_LEVEL` | `trace`, `debug`, `info`, `warn`, or `error` |
+| `IRON_DNS_PORT` | DNS port |
+| `IRON_DNS_UPSTREAM` | JSON array of socket-address strings (use JSON syntax) |
+| `IRON_IROH_PKARR_SERVER` | Optional pkarr URL |
+| `IRON_IROH_DEFAULT_RELAYS` | Boolean |
+| `IRON_IROH_RELAY_SERVERS` | JSON array of relay URL strings |
+
+Example:
+
+```bash
+IRON_DNS_UPSTREAM='["1.1.1.1:53","[2606:4700:4700::1111]:53"]' iron serve
+```
+
+Android callers should supply explicit app-private paths because the portable
+core does not define Android filesystem defaults.
+
+The database stores mutable application state; TOML remains configuration and
+the identity key remains a dedicated private file. Its directory must be private
+and writable for database and WAL files. See [Persistent application state](state.md)
+for the storage contract and backup considerations.
+
+### Explicit migration from legacy state
+
+Run `iron migrate --from OLD_DIR` to copy a legacy key and import optional
+`known_peers.json` into the currently configured state database. Migration
+validates the source key, refuses to overwrite any existing destination state,
+and leaves the source directory untouched. There is no automatic migration at
+startup. This compatibility command is deprecated and planned for removal in
+the next release.
+
+For self-hosted or offline networks, use the global `--pkarr-server`,
+`--default-relays=false`, and repeatable `--relay-server` settings documented
+above, or their `IRON_IROH_*` environment equivalents. The normal default
+is iroh's public infrastructure.
 
 ### Example Output
 
@@ -125,7 +211,7 @@ df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq.iron
 IPv6 address:
 fd69:726f::3d36:8b3d:fa9b:0339
 
-Key file: /Users/you/.config/iron/secret.key
+Key file: /Library/Application Support/iron/secret.key
 ```
 
 ### Options
@@ -163,7 +249,7 @@ iron self -f json
 **Output**:
 ```json
 {
-  "key_file": "/Users/you/.config/iron/secret.key",
+  "key_file": "/Library/Application Support/iron/secret.key",
   "key_exists": true,
   "node_id": {
     "hex": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
@@ -275,7 +361,7 @@ iron key info
 Key Information
 ────────────────────────────────────────────────────────
 
-Path: /Users/you/.config/iron/secret.key
+Path: /Library/Application Support/iron/secret.key
 Exists: Yes
 Size: 32 bytes
 Permissions: 0600 (owner read/write only)
@@ -289,7 +375,7 @@ df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq
 
 **Show info for different key file**:
 ```bash
-iron key info --path /path/to/other/key
+iron key info --key-file /path/to/other/key
 ```
 
 ### iron key generate
@@ -372,11 +458,12 @@ Check if a key file is valid:
 iron key validate
 ```
 
-**Validates default key at** `~/.config/iron/secret.key`
+**Validates the resolved key file**, by default `/var/lib/iron/secret.key` on
+Linux or `/Library/Application Support/iron/secret.key` on macOS.
 
 **Validate different file**:
 ```bash
-iron key validate --path /path/to/key
+iron key validate --key-file /path/to/key
 ```
 
 **Output** (valid):
@@ -404,7 +491,7 @@ iron key reset
 ```
 Warning: This will DELETE your current key!
   Node ID: df7wwi7bnsctfrvlza4pvtk6u6e34ddwwkjagnadtp5iwpjwrvqq
-  Path: /Users/you/.config/iron/secret.key
+  Path: /Library/Application Support/iron/secret.key
 
 Type 'yes' to confirm: 
 ```
@@ -754,12 +841,9 @@ All commands follow standard Unix exit code conventions:
 
 ## Environment Variables
 
-**RUST_LOG**: Override log level
-```bash
-RUST_LOG=iron=debug sudo -E iron
-```
-
-**HOME**: Key file location is `$HOME/.config/iron/secret.key`
+See [Configuration](#configuration) for the complete `IRON_*` environment
+variable list and examples. `IRON_LOG_LEVEL` replaces the old `RUST_LOG`
+setting for the daemon's configured log level.
 
 ---
 

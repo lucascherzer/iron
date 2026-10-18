@@ -1,4 +1,6 @@
+use crate::platform::PrivateFileWriter;
 use iroh::{EndpointId, SecretKey};
+use std::{io::Write, path::Path};
 
 /// Create a test `EndpointId` from a seed byte.
 /// The same seed always produces the same `EndpointId`,
@@ -15,4 +17,22 @@ pub fn test_resolver() -> std::sync::Arc<crate::dns::DnsResolver> {
         std::sync::Arc::new(crate::mapping::Registry::new()),
         vec![],
     ))
+}
+
+/// Create-only [`PrivateFileWriter`] without permission handling; the real
+/// 0600/0700 behavior is the platform crate's job and tested there.
+pub struct TestPrivateFileWriter;
+
+impl PrivateFileWriter for TestPrivateFileWriter {
+    fn create_new(&self, path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(contents)?;
+        Ok(())
+    }
 }

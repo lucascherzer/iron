@@ -17,6 +17,13 @@ and servers listen on IPv6 any (`::`). Expected `fd69:726f::/32` addresses in
 DNS assertions are tunnel addresses, not sandbox LAN addresses. Link faults
 are applied to `eth1`, below the tunnel; `eth0` is QEMU user networking.
 
+Iron services use the production binary with `IRON_*` environment overrides.
+`IRON_IROH_DEFAULT_RELAYS=false` and the JSON-encoded local relay list exclude
+public relays; `IRON_IROH_PKARR_SERVER` replaces default publication and lookup.
+Each VM generates its identity once before starting the daemon, checks private
+permissions, and verifies that startup preserves the identity. Both the service
+and identity commands use `/var/lib/iron/secret.key`; `HOME` is not involved.
+
 Run a check with a Linux builder supporting `kvm` and `nixos-test`:
 
 ```sh

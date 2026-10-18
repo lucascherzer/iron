@@ -1,8 +1,8 @@
-use super::{key_path, load_key};
 use anyhow::{Context, Result};
 use serde_json::json;
 
 pub fn run(
+    configured_key_path: &std::path::Path,
     format: Option<String>,
     hex: bool,
     base32: bool,
@@ -12,16 +12,16 @@ pub fn run(
 ) -> Result<()> {
     // Handle --exists flag (just check and exit)
     if exists {
-        match load_key() {
+        match iron_core::keys::load_key(configured_key_path) {
             Ok(_) => std::process::exit(0),
             Err(_) => std::process::exit(1),
         }
     }
 
     // Load the key
-    let secret_key = load_key().context(
-        "No key file found\n\n\
-        Run 'iron' once to generate a key, or use 'iron vanity' to create a custom key.",
+    let secret_key = iron_core::keys::load_key(configured_key_path).context(
+        "Could not load the configured key\n\n\
+        If it is missing, use 'iron key generate --save' or start 'iron serve'.",
     )?;
 
     let endpoint_id = secret_key.public();
@@ -54,7 +54,7 @@ pub fn run(
     if let Some(fmt) = format {
         match fmt.to_lowercase().as_str() {
             "json" => {
-                let key_path = key_path()?;
+                let key_path = configured_key_path.to_path_buf();
                 let output = json!({
                     "key_file": key_path.to_string_lossy(),
                     "key_exists": true,
@@ -79,7 +79,7 @@ pub fn run(
     }
 
     // Default: pretty output
-    let key_path = key_path()?;
+    let key_path = configured_key_path.to_path_buf();
 
     println!("\nIron Node Identity:");
     println!("  Key file:  {}", key_path.display());

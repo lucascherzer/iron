@@ -172,7 +172,9 @@ fn rewrite_source_address(
 
 ### Key Storage
 
-**Location**: `~/.config/iron/secret.key`
+**Default location**: `/var/lib/iron/secret.key` on Linux and
+`/Library/Application Support/iron/secret.key` on macOS. Override it with
+`key_file` in TOML, `IRON_KEY_FILE`, or `--key-file`.
 
 **Permissions**: `0600` (owner read/write only)
 ```bash
@@ -180,9 +182,9 @@ fn rewrite_source_address(
 ```
 
 **Protection**:
-- Only file owner can read/write
-- Other users cannot access (even with root, need explicit permission override)
-- Directory permissions: `0700` (owner access only)
+- The key file is created with owner-only permissions (`0600`).
+- The NixOS service uses `StateDirectory=iron` with mode `0700`.
+- Protect the configured parent directory and backups with equivalent care.
 
 ### Key Generation
 
@@ -224,20 +226,10 @@ pub fn load_or_generate_key() -> Result<SecretKey> {
 - Backup key securely
 - Don't share key file (only share EndpointId/base32)
 
-### Sudo Ownership Fix
-
-**Problem**: When run with `sudo`, key files may be created as `root:root`
-
-**Solution**: Automatic ownership fix (src/bin/iron.rs:459-523)
-```rust
-fn fix_key_directory_ownership() -> Result<()> {
-    // Get original user from SUDO_USER env var
-    if let Some(user) = get_original_user() {
-        // Change ownership to original user
-        chown_recursive(key_dir, user.uid, user.gid)?;
-    }
-}
-```
+Run the managed daemon as a single service using the same configured state
+paths. Do not run concurrent managed instances against one key or known-peer
+file. Legacy state migration is explicit (`iron migrate --from OLD_DIR`), never
+runs at startup, refuses destination overwrite, and leaves the source intact.
 
 **Security benefit**: Keys remain owned by user, not root
 
@@ -303,7 +295,8 @@ When iron auto-configures DNS:
 
 ### 1. Key File Theft
 
-**Attack**: Steal `~/.config/iron/secret.key`
+**Attack**: Steal the configured secret key, by default
+`/var/lib/iron/secret.key` on Linux.
 
 **Impact**: 
 - Attacker can impersonate the node
@@ -403,7 +396,7 @@ When iron auto-configures DNS:
 1. **Protect your key file**
    ```bash
    # Verify permissions
-   ls -la ~/.config/iron/secret.key
+   sudo ls -la /var/lib/iron/secret.key
    # Should show: -rw------- (0600)
    ```
 

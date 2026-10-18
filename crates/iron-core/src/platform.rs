@@ -23,7 +23,15 @@
 use anyhow::Result;
 use futures::{Sink, Stream};
 use std::net::Ipv6Addr;
+use std::path::Path;
 use std::pin::Pin;
+
+/// Platform-provided secure, create-only file storage for private material.
+/// Implementations must use restrictive permissions at creation and never
+/// replace an existing path.
+pub trait PrivateFileWriter: Send + Sync {
+    fn create_new(&self, path: &Path, contents: &[u8]) -> Result<()>;
+}
 
 /// Raw IP packet stream coming *from* the OS network stack.
 pub type PacketStream = Pin<Box<dyn Stream<Item = std::io::Result<Vec<u8>>> + Send>>;

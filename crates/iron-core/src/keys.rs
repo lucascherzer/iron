@@ -5,6 +5,7 @@
 //! crate; the file is written with 0600 permissions.
 
 use crate::paths::StatePaths;
+use crate::platform::PrivateFileWriter;
 use anyhow::{Context, Result};
 use iroh::SecretKey;
 use std::fs;
@@ -26,25 +27,37 @@ use tracing::{debug, info};
 /// # Returns
 ///
 /// Returns the loaded or newly generated SecretKey
-pub fn load_or_generate_key(paths: &StatePaths) -> Result<SecretKey> {
+pub fn load_or_generate_key(
+    paths: &StatePaths,
+    store: &dyn PrivateFileWriter,
+) -> Result<SecretKey> {
     let key_path = paths.key_file();
 
-    if key_path.exists() {
-        info!("Loading existing key from {}", key_path.display());
-        load_key(&key_path)
-    } else {
-        info!("No existing key found, generating new key");
-        let key = SecretKey::generate();
-        save_key(&key_path, &key)?;
-        info!("Key saved to {}", key_path.display());
-        Ok(key)
+    match fs::read(&key_path) {
+        Ok(bytes) => {
+            info!("Loading existing key from {}", key_path.display());
+            parse_key(bytes)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            info!("No existing key found, generating new key");
+            let key = SecretKey::generate();
+            store
+                .create_new(&key_path, &key.to_bytes())
+                .context("Failed to create key file")?;
+            info!("Key saved to {}", key_path.display());
+            Ok(key)
+        }
+        Err(error) => Err(error).context("Failed to read key file"),
     }
 }
 
 /// Load a secret key from a file
 pub fn load_key(path: &Path) -> Result<SecretKey> {
     let bytes = fs::read(path).context("Failed to read key file")?;
+    parse_key(bytes)
+}
 
+fn parse_key(bytes: Vec<u8>) -> Result<SecretKey> {
     if bytes.len() != 32 {
         anyhow::bail!(
             "Invalid key file: expected 32 bytes, got {}. File may be corrupted.",
@@ -62,55 +75,11 @@ pub fn load_key(path: &Path) -> Result<SecretKey> {
     Ok(key)
 }
 
-/// Save a secret key to a file with secure permissions
-fn save_key(path: &Path, key: &SecretKey) -> Result<()> {
-    // Create directory if it doesn't exist
-    let dir = path
-        .parent()
-        .context("Failed to get parent directory of key file")?;
-
-    if !dir.exists() {
-        debug!("Creating key directory: {}", dir.display());
-        fs::create_dir_all(dir).context("Failed to create key directory")?;
-
-        // Set directory permissions to 0700 (owner only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(dir)?.permissions();
-            perms.set_mode(0o700);
-            fs::set_permissions(dir, perms)?;
-            debug!("Set directory permissions to 0700");
-        }
-    }
-
-    // Write key to file
-    let key_bytes = key.to_bytes();
-    fs::write(path, key_bytes).context("Failed to write key file")?;
-
-    // Set file permissions to 0600 (owner read/write only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(path, perms)?;
-        debug!("Set key file permissions to 0600");
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On non-Unix systems, we can't set permissions the same way
-        // The file system should still provide some default protection
-        debug!("File permissions not explicitly set (not on Unix-like system)");
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::PrivateFileWriter;
+    use crate::test_utils::TestPrivateFileWriter;
     use std::fs;
     use tempfile::TempDir;
 
@@ -119,9 +88,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("test_secret.key");
 
-        // Generate and save a key
+        // Create key file directly for load validation.
         let original_key = SecretKey::generate();
-        save_key(&key_path, &original_key).unwrap();
+        fs::write(&key_path, original_key.to_bytes()).unwrap();
 
         // Load the key
         let loaded_key = load_key(&key_path).unwrap();
@@ -140,11 +109,11 @@ mod tests {
         let paths = StatePaths::new(temp_dir.path());
 
         // First call generates and persists
-        let generated = load_or_generate_key(&paths).unwrap();
+        let generated = load_or_generate_key(&paths, &TestPrivateFileWriter).unwrap();
         assert!(paths.key_file().exists());
 
         // Second call loads the same key
-        let loaded = load_or_generate_key(&paths).unwrap();
+        let loaded = load_or_generate_key(&paths, &TestPrivateFileWriter).unwrap();
         assert_eq!(generated.to_bytes(), loaded.to_bytes());
     }
 
@@ -170,20 +139,29 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn test_key_file_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn corrupt_existing_key_is_not_replaced() {
         let temp_dir = TempDir::new().unwrap();
-        let key_path = temp_dir.path().join("test_secret.key");
+        let paths = StatePaths::new(temp_dir.path());
+        fs::write(paths.key_file(), [1, 2, 3]).unwrap();
+        assert!(load_or_generate_key(&paths, &TestPrivateFileWriter).is_err());
+        assert_eq!(fs::read(paths.key_file()).unwrap(), [1, 2, 3]);
+    }
 
-        let key = SecretKey::generate();
-        save_key(&key_path, &key).unwrap();
+    #[test]
+    fn create_only_store_does_not_clobber() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("key");
+        TestPrivateFileWriter.create_new(&path, &[7; 32]).unwrap();
+        assert!(TestPrivateFileWriter.create_new(&path, &[8; 32]).is_err());
+        assert_eq!(fs::read(path).unwrap(), [7; 32]);
+    }
 
-        let metadata = fs::metadata(&key_path).unwrap();
-        let mode = metadata.permissions().mode();
-
-        // Check that only owner has read/write permissions
-        assert_eq!(mode & 0o777, 0o600, "Key file should have 0600 permissions");
+    #[test]
+    fn unreadable_path_is_not_replaced() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = StatePaths::new(temp_dir.path());
+        fs::create_dir(paths.key_file()).unwrap();
+        assert!(load_or_generate_key(&paths, &TestPrivateFileWriter).is_err());
+        assert!(paths.key_file().is_dir());
     }
 }

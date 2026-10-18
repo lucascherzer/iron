@@ -40,6 +40,39 @@ The binary will be at `result/bin/iron`.
 nix flake check
 ```
 
+## NixOS service
+
+Import `nixosModules.iron` and set typed daemon settings. The module writes
+these settings as TOML, runs the daemon with that file, and manages state in
+`/var/lib/iron` with mode `0700`.
+
+```nix
+{
+  imports = [ iron-flake.nixosModules.iron ];
+  services.iron = {
+    enable = true;
+    settings = {
+      logLevel = "info";
+      dnsPort = 5333;
+      dnsUpstream = [ "1.1.1.1:53" ];
+      iroh = {
+        defaultRelays = true;
+        relayServers = [ ];
+      };
+    };
+  };
+}
+```
+
+Existing `services.iron.logLevel` and `services.iron.dnsPort` settings remain
+supported as compatibility aliases; new configurations should use
+`services.iron.settings`.
+
+NixOS `keyFile` and `stateFile` must name different files below `/var/lib/iron/`.
+Nested directories are allowed; outside paths and traversal components are
+rejected during evaluation without relaxing the service sandbox. This restriction
+does not apply to standalone CLI or portable-core callers.
+
 ## Usage
 
 ### Starting iron
@@ -74,10 +107,43 @@ Use the base32 Node ID for DNS queries.
 ### Identity persistence
 
 Your Node ID and `.iron` domain are persistent across restarts. iron generates
-and saves a secret key on first run:
+and saves a secret key on first run. The default state paths are:
 
-- Key location: `~/.config/iron/secret.key`
-- Permissions: 0600 (owner read/write only)
+- Linux: `/etc/iron/config.toml`, `/var/lib/iron/secret.key`, and
+  `/var/lib/iron/state.db`
+- macOS: `/Library/Application Support/iron/config.toml`,
+  `/Library/Application Support/iron/secret.key`, and
+  `/Library/Application Support/iron/state.db`
+
+Use `--config PATH` to select a configuration file or `--no-config` to skip
+loading one. A missing implicit default config is fine; a missing file
+explicitly selected with `--config` is an error. Configuration is layered in
+this order: built-in/platform defaults, TOML, `IRON_*` environment variables,
+then CLI flags. See [Configuration](doc/cli.md#configuration) for all fields
+and environment variable formats.
+
+`--key-file` and `--state-file` (or their `IRON_*` environment variables)
+can override the state paths. On Android, pass explicit app-private paths; the
+core remains platform-portable and does not choose Android filesystem paths.
+
+The local state database stores learned peers using the embedded Turso engine.
+TOML remains administrator configuration, and the secret key remains a separate
+private file. The database directory must also allow the engine's WAL files.
+Hostname aliases and configuration-to-state reconciliation are not implemented
+by this change.
+See [Persistent application state](doc/state.md) for the schema, lifecycle,
+migration, and database-directory requirements.
+
+Older installations may migrate state explicitly:
+
+```bash
+sudo iron migrate --from /path/to/old/iron-directory
+```
+
+Migration is deprecated and planned for removal in the next release. It is
+never performed automatically at startup, refuses to overwrite destination
+state, and leaves the original directory untouched. Run one managed iron node
+per machine; do not start multiple instances against the same state files.
 
 Keep this key secure; it is your node's identity. Your domain name stays the
 same across restarts, so peers can always reach you at the same address.
@@ -86,9 +152,6 @@ To reset your identity:
 
 ```bash
 iron key reset
-# or manually:
-rm ~/.config/iron/secret.key
-sudo iron serve
 ```
 
 ### DNS configuration
@@ -139,10 +202,11 @@ Global Options:
 
 ### Environment variables
 
-`RUST_LOG` controls log levels per module and overrides `--log-level`:
+`IRON_LOG_LEVEL` overrides the configured log level; an explicit CLI
+`--log-level` takes precedence over the environment:
 
 ```bash
-RUST_LOG=iron::protocol=trace,iron=info sudo iron serve
+sudo IRON_LOG_LEVEL=debug iron serve
 ```
 
 ## Connecting two nodes
@@ -304,10 +368,10 @@ Limitations](doc/testing-limitations.md) for details.
 - `debug`: packet flow, DNS queries, mappings
 - `trace`: very detailed (stream operations, individual packets)
 
-Per-module filtering:
+Enable trace logging:
 
 ```bash
-RUST_LOG=iron::dns=debug,iron::router=trace,iron=info sudo iron serve
+IRON_LOG_LEVEL=trace sudo iron serve
 ```
 
 ## Development
@@ -351,7 +415,9 @@ cargo doc --open --no-deps
 - MTU: 1420 bytes (accounts for QUIC overhead)
 - ALPN: `iron/packet/0`
 - DNS encoding: base32 (no padding), 52 characters
-- Key storage: `~/.config/iron/secret.key` (0600 permissions)
+- Key storage: system-owned configurable file (0600 permissions), by default
+  `/var/lib/iron/secret.key` on Linux or
+  `/Library/Application Support/iron/secret.key` on macOS
 - Platform: macOS (utun), Linux (iron0)
 
 ### Security

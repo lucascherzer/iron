@@ -1,7 +1,6 @@
-use super::key_path;
 use anyhow::{Result, anyhow};
 use iroh::SecretKey;
-use std::fs;
+use iron_core::platform::PrivateFileWriter;
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -9,6 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub fn run(
+    configured_key_path: &std::path::Path,
     prefix: String,
     threads: Option<usize>,
     max_attempts: Option<u64>,
@@ -30,7 +30,7 @@ pub fn run(
     let elapsed = start_time.elapsed();
 
     display_result(&result, elapsed, quiet)?;
-    handle_save(&result, save, output, quiet, &prefix)
+    handle_save(configured_key_path, &result, save, output, quiet)
 }
 
 fn resolve_thread_count(threads: Option<usize>) -> usize {
@@ -199,11 +199,11 @@ fn display_result(result: &VanityResult, elapsed: Duration, quiet: bool) -> Resu
 }
 
 fn handle_save(
+    configured_key_path: &std::path::Path,
     result: &VanityResult,
     save: bool,
     output: Option<String>,
     quiet: bool,
-    prefix: &str,
 ) -> Result<()> {
     let should_save = if save || output.is_some() {
         true
@@ -220,14 +220,23 @@ fn handle_save(
 
     if should_save {
         if let Some(output_path) = output {
-            save_key_to_file(&result.secret_key, &output_path)?;
+            iron_desktop::DesktopPrivateFileWriter.create_new(
+                std::path::Path::new(&output_path),
+                &result.secret_key.to_bytes(),
+            )?;
             if !quiet {
                 println!("✓ Key saved to: {}", output_path);
             }
         } else {
-            let key_path = key_path()?;
+            let key_path = configured_key_path.to_path_buf();
+            let replace_existing = key_path.exists();
 
-            if key_path.exists() && !quiet {
+            if replace_existing && quiet {
+                return Err(anyhow!(
+                    "refusing to replace an existing identity in quiet mode"
+                ));
+            }
+            if replace_existing {
                 print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
                 io::stdout().flush()?;
                 let mut input = String::new();
@@ -241,29 +250,18 @@ fn handle_save(
                 }
             }
 
-            let key_path_str = key_path
-                .to_str()
-                .ok_or_else(|| anyhow!("Key path contains invalid UTF-8"))?;
-            match save_key_to_file(&result.secret_key, key_path_str) {
+            let saved = if replace_existing {
+                iron_desktop::DesktopPrivateFileWriter
+                    .replace(&key_path, &result.secret_key.to_bytes())
+            } else {
+                iron_desktop::DesktopPrivateFileWriter
+                    .create_new(&key_path, &result.secret_key.to_bytes())
+            };
+            match saved {
                 Ok(_) => {
                     if !quiet {
                         println!("✓ Key saved to: {}", key_path.display());
                     }
-                }
-                Err(e) if e.to_string().contains("Permission denied") => {
-                    println!();
-                    println!("⚠️  Permission denied. The key directory may be owned by root.");
-                    println!();
-                    println!("Solutions:");
-                    println!("1. Run iron daemon once (as root) to fix permissions:");
-                    println!("   sudo iron serve");
-                    println!("   (then Ctrl-C and try vanity again)");
-                    println!();
-                    println!("2. Save to a custom location:");
-                    println!("   iron vanity {} --output ~/my-key.secret", prefix);
-                    println!();
-                    println!("Secret key (save manually if needed):");
-                    println!("  {}", hex::encode(result.secret_key.to_bytes()));
                 }
                 Err(e) => return Err(e),
             }
@@ -342,23 +340,4 @@ fn format_number(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-fn save_key_to_file(secret_key: &SecretKey, path: &str) -> Result<()> {
-    let path_buf = std::path::PathBuf::from(path);
-
-    if let Some(parent) = path_buf.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::write(&path_buf, secret_key.to_bytes())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path_buf, permissions)?;
-    }
-
-    Ok(())
 }

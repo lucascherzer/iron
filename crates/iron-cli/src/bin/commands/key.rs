@@ -1,23 +1,21 @@
-use super::{key_path, load_key};
 use anyhow::{Context, Result};
 use iroh::SecretKey;
+use iron_core::platform::PrivateFileWriter;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::Path;
 
-pub fn info(path: Option<String>) -> Result<()> {
-    let key_path = path_or_default(path)?;
-
+pub fn info(key_path: &Path) -> Result<()> {
     if !key_path.exists() {
         anyhow::bail!("Key file not found: {}", key_path.display());
     }
 
     // Load key to validate it
-    let secret_key = iron_core::keys::load_key(&key_path)?;
+    let secret_key = iron_core::keys::load_key(key_path)?;
     let endpoint_id = secret_key.public();
 
     // Get file metadata
-    let metadata = fs::metadata(&key_path)?;
+    let metadata = fs::metadata(key_path)?;
     let size = metadata.len();
 
     println!("\nKey file: {}", key_path.display());
@@ -29,8 +27,9 @@ pub fn info(path: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn export(format: String, output: Option<String>) -> Result<()> {
-    let secret_key = load_key().context("No key found. Generate one with: iron key generate")?;
+pub fn export(format: String, output: Option<String>, configured_path: &Path) -> Result<()> {
+    let secret_key = iron_core::keys::load_key(configured_path)
+        .context("No key found. Generate one with: iron key generate")?;
     let bytes = secret_key.to_bytes();
 
     let encoded = match format.to_lowercase().as_str() {
@@ -40,7 +39,8 @@ pub fn export(format: String, output: Option<String>) -> Result<()> {
     };
 
     if let Some(output_path) = output {
-        fs::write(&output_path, &encoded)?;
+        iron_desktop::DesktopPrivateFileWriter
+            .create_new(output_path.as_ref(), encoded.as_bytes())?;
         println!("✓ Key exported to: {}", output_path);
     } else {
         println!("{}", encoded);
@@ -49,7 +49,7 @@ pub fn export(format: String, output: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn import(file: String, save: bool) -> Result<()> {
+pub fn import(file: String, save: bool, configured_path: &Path) -> Result<()> {
     let content = fs::read_to_string(&file)
         .context(format!("Failed to read file: {}", file))?
         .trim()
@@ -78,8 +78,9 @@ pub fn import(file: String, save: bool) -> Result<()> {
     println!("  Node ID: {}", endpoint_id);
 
     if save {
-        let key_path = key_path()?;
-        if key_path.exists() {
+        let key_path = configured_path.to_path_buf();
+        let replace_existing = key_path.exists();
+        if replace_existing {
             print!("\nWarning: This will overwrite your existing key. Continue? (y/N) ");
             io::stdout().flush()?;
             let mut input = String::new();
@@ -91,14 +92,14 @@ pub fn import(file: String, save: bool) -> Result<()> {
         }
 
         // Save key (using the internal save function)
-        save_key_bytes(&key_path, &bytes)?;
+        save_key_bytes(&key_path, &bytes, replace_existing)?;
         println!("✓ Key saved to: {}", key_path.display());
     }
 
     Ok(())
 }
 
-pub fn generate(save: bool, force: bool) -> Result<()> {
+pub fn generate(save: bool, force: bool, configured_path: &Path) -> Result<()> {
     let secret_key = SecretKey::generate();
     let endpoint_id = secret_key.public();
 
@@ -109,9 +110,10 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
     println!("  Domain:        {}.iron", base32_id);
 
     if save {
-        let key_path = key_path()?;
+        let key_path = configured_path.to_path_buf();
+        let replace_existing = key_path.exists();
 
-        if key_path.exists() && !force {
+        if replace_existing && !force {
             println!("\nWARNING: This will overwrite your existing key.");
             println!("You will get a new Node ID and .iron domain.");
             print!("Generate new key? (y/N) ");
@@ -124,22 +126,20 @@ pub fn generate(save: bool, force: bool) -> Result<()> {
             }
         }
 
-        save_key_bytes(&key_path, &secret_key.to_bytes())?;
+        save_key_bytes(&key_path, &secret_key.to_bytes(), replace_existing)?;
         println!("\n✓ Key saved to: {}", key_path.display());
     }
 
     Ok(())
 }
 
-pub fn validate(path: Option<String>) -> Result<()> {
-    let key_path = path_or_default(path)?;
-
+pub fn validate(key_path: &Path) -> Result<()> {
     if !key_path.exists() {
         println!("✗ Key file not found: {}", key_path.display());
         std::process::exit(1);
     }
 
-    match iron_core::keys::load_key(&key_path) {
+    match iron_core::keys::load_key(key_path) {
         Ok(secret_key) => {
             let endpoint_id = secret_key.public();
             println!("✓ Valid key");
@@ -155,8 +155,8 @@ pub fn validate(path: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn reset(confirm: bool) -> Result<()> {
-    let key_path = key_path()?;
+pub fn reset(confirm: bool, configured_path: &Path) -> Result<()> {
+    let key_path = configured_path.to_path_buf();
 
     if !key_path.exists() {
         println!("✓ No key file found (already clean)");
@@ -164,7 +164,7 @@ pub fn reset(confirm: bool) -> Result<()> {
     }
 
     // Show warning and get current node ID
-    let current_node_id = if let Ok(key) = load_key() {
+    let current_node_id = if let Ok(key) = iron_core::keys::load_key(configured_path) {
         let endpoint_id = key.public();
         let base32_id = iron_core::id::to_base32(&endpoint_id);
         format!("{}.iron", base32_id)
@@ -193,30 +193,10 @@ pub fn reset(confirm: bool) -> Result<()> {
 
 // Helper functions
 
-fn path_or_default(path: Option<String>) -> Result<PathBuf> {
-    Ok(if let Some(p) = path {
-        PathBuf::from(p)
+fn save_key_bytes(path: &Path, bytes: &[u8], replace_existing: bool) -> Result<()> {
+    if replace_existing {
+        iron_desktop::DesktopPrivateFileWriter.replace(path, bytes)
     } else {
-        key_path()?
-    })
-}
-
-fn save_key_bytes(path: &PathBuf, bytes: &[u8]) -> Result<()> {
-    // Create parent directory if it doesn't exist
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        iron_desktop::DesktopPrivateFileWriter.create_new(path, bytes)
     }
-
-    // Write key file
-    fs::write(path, bytes)?;
-
-    // Set permissions to 0600 (owner read/write only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, permissions)?;
-    }
-
-    Ok(())
 }

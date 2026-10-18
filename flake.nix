@@ -13,7 +13,9 @@
   };
 
   outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, advisory-db, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+    # Match the platforms supported by the pinned nixpkgs. Unstable no
+    # longer supports x86_64-darwin; Apple Silicon macOS remains supported.
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ] (system:
       let
         pkgs = import nixpkgs {
           inherit system;
@@ -145,6 +147,7 @@
             vm = import ./tests/vm/lib.nix { inherit pkgs self; };
           in
           {
+            iron-module = import ./nix/module-tests.nix { inherit pkgs self; };
             iron-vm-two-node = import ./tests/vm/two-node.nix { lib = vm; };
             iron-vm-lossy-network = import ./tests/vm/lossy-network.nix { lib = vm; };
             iron-vm-outage = import ./tests/vm/outage.nix { lib = vm; };
@@ -164,7 +167,7 @@
           ];
 
           # Environment variables for development
-          RUST_LOG = "iron=debug";
+          IRON_LOG_LEVEL = "debug";
         };
       }
     ) // {

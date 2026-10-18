@@ -275,7 +275,7 @@ for too little use)
 
 ```bash
 # Show key information
-iron key info [--path <file>]
+iron key info
 
 # Export key to different formats
 iron key export [--format <format>] [--output <file>]
@@ -287,7 +287,7 @@ iron key import <file> [--save]
 iron key generate [--save] [--force]
 
 # Validate key file
-iron key validate [--path <file>]
+iron key validate
 
 # Reset (delete) current key
 iron key reset [--confirm]

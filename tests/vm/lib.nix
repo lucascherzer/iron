@@ -15,6 +15,10 @@ let
   relayPort = 3340;
   pkarrPort = 8080;
   ironExe = pkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.iron;
+  keyFile = "/var/lib/iron/secret.key";
+  stateFile = "/var/lib/iron/state.db";
+  # Utility commands and the service use the same explicit state paths.
+  ironCli = "IRON_KEY_FILE=${keyFile} IRON_STATE_FILE=${stateFile} ${ironExe} --no-config";
 
   infra = { lib, ... }: {
     networking.firewall.enable = false;
@@ -69,9 +73,18 @@ let
       imports = [ self.nixosModules.iron ];
       services.iron = {
         enable = true;
-        logLevel = "debug";
-        relayUrl = "http://${infraIp}:${toString relayPort}";
-        pkarrUrl = "http://${infraIp}:${toString pkarrPort}/pkarr";
+      };
+      # Use the production binary and environment layer, not test-only
+      # source patches or the retired infrastructure flags.
+      systemd.services.iron.environment = {
+        IRON_LOG_LEVEL = "debug";
+        IRON_KEY_FILE = keyFile;
+        IRON_STATE_FILE = stateFile;
+        IRON_IROH_PKARR_SERVER = "http://${infraIp}:${toString pkarrPort}/pkarr";
+        IRON_IROH_DEFAULT_RELAYS = "false";
+        IRON_IROH_RELAY_SERVERS = builtins.toJSON [
+          "http://${infraIp}:${toString relayPort}"
+        ];
       };
       # Started by the prelude once infra is up, so the first pkarr publish
       # and relay connection don't race the infra VM's boot.
@@ -106,7 +119,17 @@ let
     LAN_IF = "eth1"  # eth0 is QEMU user networking; VMs talk over eth1
 
     def iron_self(node, flag):
-        return node.succeed(f"HOME=/var/lib/iron ${ironExe} self --{flag}").strip()
+        return node.succeed(f"${ironCli} self --{flag}").strip()
+
+    with subtest("Node identities are generated once before daemon startup"):
+        for node in [a, b]:
+            node.wait_for_unit("multi-user.target", timeout=timedelta(seconds=60))
+            node.succeed("test ! -e ${keyFile}")
+            node.succeed("test ! -e ${stateFile}")
+            node.succeed("${ironCli} key generate --save")
+            node.succeed("test $(stat -c %a ${keyFile}) = 600")
+            node.succeed("test $(stat -c %a /var/lib/iron) = 700")
+        identities_before_start = [iron_self(node, "hex") for node in [a, b]]
 
     with subtest("Iron nodes start"):
         for node in [a, b]:
@@ -115,13 +138,14 @@ let
                 node.systemctl("start iron.service")
                 node.wait_for_unit("iron.service", timeout=timedelta(seconds=60))
                 node.wait_until_succeeds(
-                    "HOME=/var/lib/iron ${ironExe} self --exists",
+                    "${ironCli} self --exists",
                     timeout=timedelta(seconds=60),
                 )
             except Exception:
                 print(node.succeed("journalctl -u iron.service --no-pager"))
                 raise
 
+        assert [iron_self(node, "hex") for node in [a, b]] == identities_before_start
         a_ip, b_ip = iron_self(a, "ipv6"), iron_self(b, "ipv6")
         a_domain, b_domain = iron_self(a, "domain"), iron_self(b, "domain")
         print(f"a: {a_domain} {a_ip}")

@@ -1,83 +1,114 @@
-# NixOS module: runs `iron serve` as a system service.
-#
-# Exercised by the VM tests in tests/vm/, which use it to run every node.
+# NixOS module for the system-wide iron service.
 { self }:
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.iron;
-  # iron keeps its state in $HOME/.config/iron.
-  home = "/var/lib/iron";
-in
-{
-  options.services.iron = {
-    enable = lib.mkEnableOption "iron P2P network interface";
-
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.iron;
-      defaultText = lib.literalExpression "iron.packages.\${system}.iron";
-      description = "The iron package to run.";
-    };
-
-    logLevel = lib.mkOption {
-      type = lib.types.str;
-      default = "info";
-      description = "Log level (trace, debug, info, warn, error)";
-    };
-
-    dnsPort = lib.mkOption {
-      type = lib.types.port;
-      default = 5333;
-      description = "DNS server port";
-    };
-
-    relayUrl = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "https://relay.example.com";
-      description = "Relay server to use instead of n0's public relays.";
-    };
-
-    pkarrUrl = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "https://dns.example.com/pkarr";
-      description = "pkarr server to publish to and resolve peers from, instead of n0's.";
+  stateDirectory = "iron";
+  stateRoot = "/var/lib/${stateDirectory}";
+  # Lexical checks give useful deployment errors; systemd remains the actual
+  # isolation boundary. No host filesystem probing or implicit write grants.
+  validStatePath = path:
+    lib.hasPrefix "${stateRoot}/" path
+    && lib.all (part: part != "" && part != "." && part != "..")
+      (lib.tail (lib.splitString "/" path));
+  settings = {
+    key_file = cfg.settings.keyFile;
+    state_file = cfg.settings.stateFile;
+    log_level = cfg.settings.logLevel;
+    dns_port = cfg.settings.dnsPort;
+    dns_upstream = cfg.settings.dnsUpstream;
+    iroh = {
+      default_relays = cfg.settings.iroh.defaultRelays;
+      relay_servers = cfg.settings.iroh.relayServers;
+    } // lib.optionalAttrs (cfg.settings.iroh.pkarrServer != null) {
+      pkarr_server = cfg.settings.iroh.pkarrServer;
     };
   };
-
+  configFile = (pkgs.formats.toml { }).generate "iron-config.toml" settings;
+  types = lib.types;
+  mkOption = lib.mkOption;
+in {
+  options.services.iron = {
+    enable = lib.mkEnableOption "iron P2P network interface";
+    package = mkOption {
+      type = types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.iron;
+      description = "The iron package to run.";
+    };
+    settings = mkOption {
+      default = { };
+      description = "Typed iron daemon settings written to TOML.";
+      type = types.submodule {
+        options = {
+          keyFile = mkOption {
+            type = types.str;
+            default = "${stateRoot}/secret.key";
+            description = "Private identity file below ${stateRoot}/, without traversal components.";
+          };
+          stateFile = mkOption {
+            type = types.str;
+            default = "${stateRoot}/state.db";
+            description = "Application-state file below ${stateRoot}/, without traversal components.";
+          };
+          logLevel = mkOption { type = types.enum [ "trace" "debug" "info" "warn" "error" ]; default = "info"; };
+          dnsPort = mkOption { type = types.port; default = 5333; };
+          dnsUpstream = mkOption { type = types.listOf types.str; default = [ ]; };
+          iroh = mkOption {
+            default = { };
+            type = types.submodule {
+              options = {
+                pkarrServer = mkOption { type = types.nullOr types.str; default = null; };
+                defaultRelays = mkOption { type = types.bool; default = true; };
+                relayServers = mkOption { type = types.listOf types.str; default = [ ]; };
+              };
+            };
+          };
+        };
+      };
+    };
+    logLevel = mkOption {
+      type = types.nullOr (types.enum [ "trace" "debug" "info" "warn" "error" ]);
+      default = null;
+      description = "Compatibility alias for settings.logLevel.";
+    };
+    dnsPort = mkOption {
+      type = types.nullOr types.port;
+      default = null;
+      description = "Compatibility alias for settings.dnsPort.";
+    };
+  };
   config = lib.mkIf cfg.enable {
-    # iron writes a systemd-resolved drop-in here so `.iron` names resolve;
-    # it must exist to be listed in ReadWritePaths below.
+    assertions = [
+      {
+        assertion = cfg.settings.iroh.defaultRelays || cfg.settings.iroh.relayServers != [ ];
+        message = "services.iron.settings.iroh must enable defaultRelays or configure relayServers.";
+      }
+      {
+        assertion = validStatePath cfg.settings.keyFile;
+        message = "services.iron.settings.keyFile must be an absolute file path below ${stateRoot}/, with no empty, '.' or '..' components.";
+      }
+      {
+        assertion = validStatePath cfg.settings.stateFile;
+        message = "services.iron.settings.stateFile must be an absolute file path below ${stateRoot}/, with no empty, '.' or '..' components.";
+      }
+      {
+        assertion = cfg.settings.keyFile != cfg.settings.stateFile;
+        message = "services.iron.settings.keyFile and stateFile must refer to different files.";
+      }
+    ];
     systemd.tmpfiles.rules = [ "d /etc/systemd/resolved.conf.d 0755 root root -" ];
-
     systemd.services.iron = {
       description = "iron P2P Network Interface";
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
-      # TUN setup shells out to `ip`.
       path = [ pkgs.iproute2 ];
-      environment.HOME = home;
-
       serviceConfig = {
-        ExecStart = lib.escapeShellArgs (
-          [
-            (lib.getExe cfg.package)
-            "serve"
-            "--log-level"
-            cfg.logLevel
-            "--dns-port"
-            (toString cfg.dnsPort)
-          ]
-          ++ lib.optionals (cfg.relayUrl != null) [ "--relay-url" cfg.relayUrl ]
-          ++ lib.optionals (cfg.pkarrUrl != null) [ "--pkarr-url" cfg.pkarrUrl ]
-        );
+        ExecStart = "${lib.getExe cfg.package} --config ${configFile} serve";
         Restart = "on-failure";
         RestartSec = 5;
-        StateDirectory = "iron";
-
-        # Security hardening
+        StateDirectory = stateDirectory;
+        StateDirectoryMode = "0700";
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
         NoNewPrivileges = true;
@@ -87,5 +118,7 @@ in
         ReadWritePaths = [ "/etc/systemd/resolved.conf.d" ];
       };
     };
+    services.iron.settings.logLevel = lib.mkIf (cfg.logLevel != null) (lib.mkDefault cfg.logLevel);
+    services.iron.settings.dnsPort = lib.mkIf (cfg.dnsPort != null) (lib.mkDefault cfg.dnsPort);
   };
 }

@@ -35,8 +35,10 @@ pub mod paths;
 pub mod platform;
 pub mod protocol;
 pub mod router;
+pub mod state;
 pub mod test_utils;
 
-pub use node::{IrohInfra, IronNode, NodeConfig};
+pub use node::{IrohConfig, IronNode, NodeConfig};
 pub use packet::Packet;
 pub use paths::StatePaths;
+pub use state::AppState;

@@ -55,19 +55,18 @@ To generate a pretty key:
 ```
 
 ## Key lifecycle
-Your private key lives in `$XDG_CONFIG_DIR/iron/secret.key`
-(usually `~/.config/iron/secret.key`). The key is tied to your iron domain name
-and in order for others to not have to change your domain frequently, you should
-not change it too often.
+Your private key is tied to your iron domain name. The defaults are
+`/var/lib/iron/secret.key` on Linux and
+`/Library/Application Support/iron/secret.key` on macOS. Configuration files
+and known-peer state are stored alongside platform state; see the
+[configuration reference](cli.md#configuration) to override paths.
 You can manage keys with the `iron key` subcommand.
 
-## Pretty Key is not recognized
-On linux systems, the key location may not be what `iron key info` reports.
-Since it ran as root, the key will have been saved in `/root/.config/iron/secret.key`
-instead of your home directory. Follow these steps to fix:
-```sh
-sudo rm /root/.config/iron/secret.key
-sudo mv /home/<your user>/.config/iron/secret.key /root/.config/iron/secret.key
-chown root:root /root/.config/iron/secret.key
-```
-Then restart iron.
+Legacy state can be moved explicitly with `sudo iron migrate --from OLD_DIR`.
+Migration never runs automatically, refuses to overwrite destination state,
+and leaves the original directory intact. This compatibility command is
+deprecated and planned for removal in the next release. Run one managed iron
+node per machine; do not share state files between instances.
+
+For Android, pass explicit app-private key and known-peer paths; the portable
+core does not select Android filesystem locations.
