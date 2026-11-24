@@ -181,10 +181,36 @@ router.run(tun_io).await?;
 - Can add versioned protocols later (e.g., `b"iron/packet/1"`)
 
 **Connection Strategy**:
-- One QUIC connection per remote EndpointId
-- Bi-directional streams for packet forwarding
+- Each direction uses its own QUIC connection: the pool caches only connections
+  we dialed, one per destination EndpointId. Accepted connections are only read
+  from, never cached or reused for replies. Two peers talking both ways hold two
+  connections, but never have to agree on which one to keep (crossed dials and
+  restarted peers need no special handling).
+- One stream per packet
 - Leverage iroh's built-in NAT traversal and relay support
-- **Connection pooling**: Cached connections reused to avoid repeated handshakes
+- **Connection pooling**: Closed or idle entries are never handed out; a
+  one-second sweep also closes connections idle for 60 seconds. Checkout and
+  successful sends refresh activity. A compile-time assertion keeps the idle TTL
+  above the 10-second send deadline, so the sweep cannot close a connection a
+  send just checked out. Both values are constants, not configuration.
+- **Outbound isolation**: A bounded 256-packet router queue feeds up to 128
+  independent peer sender tasks, each with a 64-packet queue, so a stalled peer
+  only blocks its own queue. A sender retires after 60 seconds without traffic;
+  a packet that hits its closed queue goes to a fresh sender. Full queues and
+  the sender limit drop packets (debug log only). Packets travel on independent
+  QUIC streams, so delivery order is not guaranteed.
+- **Failure handling**: Dial, stream open and write share a 10-second deadline.
+  A timeout resets only that packet's stream; the connection is dropped only if
+  QUIC reports it closed, and never a newer replacement. A failed stream open
+  gets one reconnect attempt, but packets are never replayed after writing
+  starts because delivery is ambiguous: success means queued for QUIC, not
+  acknowledged. After a failed send the peer's sender waits a ten-second cooldown
+  and then drops everything queued meanwhile, instead of redialing per packet.
+- **Receiving**: Up to 32 incoming handshakes run concurrently, each with a
+  10-second deadline. Each accepted connection gets one receive task (owned by
+  the accept loop) that reads its streams in order. Inbound traffic is not
+  rate-limited: the channel to the TUN is unbounded, and admitting or rejecting
+  peers is left to the access-control layer.
 
 **Security Features**:
 - Source address rewriting: Packets have source IPv6 rewritten to match authenticated sender

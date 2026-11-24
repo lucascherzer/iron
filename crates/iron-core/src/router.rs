@@ -35,7 +35,7 @@ pub struct PacketRouter {
     registry: Arc<Registry>,
     /// Channel for sending packets TO network (OS → iroh)
     /// Format: (destination_endpoint_id, Packet)
-    to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
+    to_network_tx: mpsc::Sender<(EndpointId, Packet)>,
     /// Channel for receiving packets FROM network (iroh → OS)
     /// Format: Packet (with correct source IPv6 already set)
     from_network_rx: mpsc::UnboundedReceiver<Packet>,
@@ -63,7 +63,7 @@ impl PacketRouter {
     pub fn new(
         registry: Arc<Registry>,
         dns_resolver: Arc<DnsResolver>,
-        to_network_tx: mpsc::UnboundedSender<(EndpointId, Packet)>,
+        to_network_tx: mpsc::Sender<(EndpointId, Packet)>,
         from_network_rx: mpsc::UnboundedReceiver<Packet>,
     ) -> Self {
         let (dns_tx, dns_rx) = mpsc::unbounded_channel();
@@ -224,9 +224,18 @@ impl PacketRouter {
             debug!("Resolved {} -> EndpointId {}", dest_addr, endpoint_id);
 
             // Send to network layer (iroh will handle actual transmission)
-            self.to_network_tx
-                .send((endpoint_id, Packet::raw(packet.to_vec())))
-                .context("Failed to send packet to network layer")?;
+            match self
+                .to_network_tx
+                .try_send((endpoint_id, Packet::raw(packet.to_vec())))
+            {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    debug!("Dropping packet: outbound queue full");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    anyhow::bail!("Network layer is closed");
+                }
+            }
         } else {
             warn!(
                 "No EndpointId found for destination {}, dropping packet",
@@ -288,10 +297,35 @@ mod tests {
     #[test]
     fn test_packet_router_new() {
         let registry = Arc::new(Registry::new());
-        let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, _to_network_rx) = mpsc::channel(256);
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let _router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
         // Just verify it constructs
+    }
+
+    #[tokio::test]
+    async fn test_full_outbound_queue_drops_without_waiting() {
+        let registry = Arc::new(Registry::new());
+        let dest = registry.register(test_endpoint_id(42));
+        let (tx, mut rx) = mpsc::channel(1);
+        let (_from_tx, from_rx) = mpsc::unbounded_channel();
+        let router = PacketRouter::new(registry, test_resolver(), tx, from_rx);
+        let mut packet = vec![0; 40];
+        packet[0] = 0x60;
+        packet[6] = 59;
+        packet[24..40].copy_from_slice(&dest.octets());
+        router.handle_os_to_network(&packet).await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            router.handle_os_to_network(&packet),
+        )
+        .await
+        .expect("queue overload must not block the router");
+        assert!(result.is_ok());
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        assert!(router.handle_os_to_network(&packet).await.is_err());
     }
 
     #[tokio::test]
@@ -302,7 +336,7 @@ mod tests {
         // Get the IPv6 for this endpoint
         let dest_ip = registry.register(endpoint_id);
 
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let router = PacketRouter::new(
             Arc::clone(&registry),
@@ -352,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_os_to_network_unknown_destination() {
         let registry = Arc::new(Registry::new());
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
 
@@ -386,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_os_to_network_invalid_packet() {
         let registry = Arc::new(Registry::new());
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
 
@@ -411,7 +445,7 @@ mod tests {
         let endpoint_id = test_endpoint_id(7);
         let dest_ip = registry.register(endpoint_id);
 
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
         let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let router = PacketRouter::new(
             Arc::clone(&registry),
@@ -476,7 +510,7 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         let resolver = Arc::new(DnsResolver::new(Arc::clone(&registry), vec![]));
-        let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
         let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
         let router = PacketRouter::new(registry, resolver, to_network_tx, from_network_rx);
         let (io, os_tx, mut tun_written_rx) = fake_tun();

@@ -188,7 +188,7 @@ impl IronNode {
 
         // Create channels for packet flow
         // OS → Network: packet router sends packets to protocol handler
-        let (to_network_tx, to_network_rx) = mpsc::unbounded_channel();
+        let (to_network_tx, to_network_rx) = mpsc::channel(crate::protocol::OUTBOUND_QUEUE_SIZE);
         // Network → OS: protocol handler sends packets to packet router
         let (from_network_tx, from_network_rx) = mpsc::unbounded_channel();
 

@@ -72,7 +72,7 @@ async fn test_tun_os_to_network_packet_flow() {
     let dest_ipv6 = registry.register(endpoint_id);
 
     // Create channels
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
 
     // Create packet router
@@ -151,7 +151,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     let endpoint_a = test_endpoint_id(1);
     let _ipv6_a = registry_a.register(endpoint_a);
 
-    let (to_network_tx_a, mut to_network_rx_a) = mpsc::unbounded_channel();
+    let (to_network_tx_a, mut to_network_rx_a) = mpsc::channel(256);
     let (_from_network_tx_a, from_network_rx_a) = mpsc::unbounded_channel();
     let router_a = PacketRouter::new(
         Arc::clone(&registry_a),
@@ -165,7 +165,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
     let endpoint_b = test_endpoint_id(2);
     let ipv6_b = registry_b.register(endpoint_b);
 
-    let (_to_network_tx_b, _to_network_rx_b) = mpsc::unbounded_channel();
+    let (_to_network_tx_b, _to_network_rx_b) = mpsc::channel(256);
     let (from_network_tx_b, from_network_rx_b) = mpsc::unbounded_channel();
     let _router_b = PacketRouter::new(
         Arc::clone(&registry_b),
@@ -226,7 +226,7 @@ async fn test_simulated_packet_flow_node_a_to_b() {
 async fn test_packet_to_unregistered_destination() {
     let registry = Arc::new(Registry::new());
 
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
     let router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);
 
@@ -294,7 +294,7 @@ async fn test_concurrent_packet_processing() {
     let endpoints: Vec<_> = (0..10).map(test_endpoint_id).collect();
     let ipv6s: Vec<_> = endpoints.iter().map(|e| registry.register(*e)).collect();
 
-    let (to_network_tx, mut to_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, mut to_network_rx) = mpsc::channel(256);
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
     let router = Arc::new(PacketRouter::new(
         Arc::clone(&registry),
@@ -349,7 +349,7 @@ fn test_tun_interface_public_api() {
     // This test ensures our public API is accessible
     let registry = Arc::new(Registry::new());
 
-    let (to_network_tx, _to_network_rx) = mpsc::unbounded_channel();
+    let (to_network_tx, _to_network_rx) = mpsc::channel(256);
     let (_from_network_tx, from_network_rx) = mpsc::unbounded_channel();
 
     let _router = PacketRouter::new(registry, test_resolver(), to_network_tx, from_network_rx);

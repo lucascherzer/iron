@@ -193,16 +193,10 @@ endpoint.connect(peer_addr, b"iron/packet/0").await?;
 
 ### Connection Management
 
-**Strategy**: One QUIC connection per remote EndpointId
-- Persistent connections (no reconnect per packet)
-- Bi-directional streams for packet forwarding
-- Leverage iroh's NAT traversal and relay servers
-
-**Connection Lifecycle**:
-1. First packet to new EndpointId triggers connection
-2. Connection maintained while traffic flows
-3. Idle timeout (configurable, default 30s)
-4. Reconnect on next packet if timed out
+The first packet to an EndpointId dials a QUIC connection, which is reused
+while traffic flows and closed after 60 seconds idle; the next packet redials.
+Limits, timeouts and failure semantics are described once, under "Connection
+Strategy" in [arch.md](arch.md).
 
 ### Packet Encapsulation
 
@@ -215,12 +209,6 @@ let (mut send, _recv) = conn.open_bi().await?;
 send.write_all(packet).await?;
 send.finish()?;
 ```
-
-**Connection Pooling Optimization**:
-- Maintains cache of QUIC connections per EndpointId (`DashMap<EndpointId, Connection>`)
-- Reuses existing connections instead of repeated handshakes
-- Automatically retries with new connection if cached connection is stale
-- Significant performance improvement over naive per-packet connect
 
 **Why Not Framed Streams?**
 - Stream-per-packet is simpler and sufficient for current throughput
