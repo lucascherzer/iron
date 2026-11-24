@@ -18,7 +18,7 @@
 
 use crate::mapping::Registry;
 use anyhow::{Result, anyhow};
-use hickory_proto::op::{Header, Message, ResponseCode};
+use hickory_proto::op::{Message, Metadata, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -150,7 +150,7 @@ impl DnsResolver {
         // Exactly one question (RFC 9619). Checking only the first of
         // several would let a `.iron` question ride along in a message that
         // gets forwarded upstream verbatim.
-        let [question] = message.queries() else {
+        let [question] = message.queries.as_slice() else {
             return Some(response(&message, ResponseCode::FormErr, false, vec![]));
         };
         let name = question.name();
@@ -240,15 +240,12 @@ fn response(
     authoritative: bool,
     answers: Vec<Record>,
 ) -> Vec<u8> {
-    let mut header = Header::response_from_request(request.header());
-    header.set_response_code(code);
-    header.set_authoritative(authoritative);
-    let mut response = Message::new();
-    response.set_header(header);
-    for query in request.queries() {
-        response.add_query(query.clone());
-    }
-    response.answers_mut().extend(answers);
+    let mut response = Message::response(request.metadata.id, request.metadata.op_code);
+    response.metadata = Metadata::response_from_request(&request.metadata);
+    response.metadata.response_code = code;
+    response.metadata.authoritative = authoritative;
+    response.queries = request.queries.clone();
+    response.answers = answers;
     response.to_vec().unwrap_or_default()
 }
 
@@ -256,20 +253,17 @@ fn response(
 /// ID the client can match.
 fn form_error(query: &[u8]) -> Option<Vec<u8>> {
     let id = query.get(..2)?;
-    let mut header = Header::new();
-    header.set_id(u16::from_be_bytes([id[0], id[1]]));
-    let mut header = Header::response_from_request(&header);
-    header.set_response_code(ResponseCode::FormErr);
-    let mut response = Message::new();
-    response.set_header(header);
-    response.to_vec().ok()
+    let id = u16::from_be_bytes([id[0], id[1]]);
+    Message::error_msg(id, OpCode::Query, ResponseCode::FormErr)
+        .to_vec()
+        .ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::test_endpoint_id;
-    use hickory_proto::op::Query;
+    use hickory_proto::op::{MessageType, Query};
     use iroh::EndpointId;
     use std::str::FromStr;
 
@@ -278,9 +272,8 @@ mod tests {
     }
 
     fn query_bytes(id: u16, name: &str, record_type: RecordType) -> Vec<u8> {
-        let mut message = Message::new();
-        message.set_id(id);
-        message.set_recursion_desired(true);
+        let mut message = Message::new(id, MessageType::Query, OpCode::Query);
+        message.metadata.recursion_desired = true;
         message.add_query(Query::query(Name::from_str(name).unwrap(), record_type));
         message.to_vec().unwrap()
     }
@@ -373,10 +366,16 @@ mod tests {
                 .await
                 .unwrap();
             let reply = Message::from_vec(&reply).unwrap();
-            assert_eq!(reply.id(), 0x1234, "{name}: ID echoed");
-            assert_eq!(reply.response_code(), code, "{name} {record_type}: code");
-            assert_eq!(reply.authoritative(), authoritative, "{name}: AA flag");
-            assert_eq!(reply.answers().len(), answers, "{name}: answer count");
+            assert_eq!(reply.metadata.id, 0x1234, "{name}: ID echoed");
+            assert_eq!(
+                reply.metadata.response_code, code,
+                "{name} {record_type}: code"
+            );
+            assert_eq!(
+                reply.metadata.authoritative, authoritative,
+                "{name}: AA flag"
+            );
+            assert_eq!(reply.answers.len(), answers, "{name}: answer count");
         }
 
         // The AAAA answer is the peer's derived address, and resolving
@@ -387,7 +386,7 @@ mod tests {
             .unwrap();
         let reply = Message::from_vec(&reply).unwrap();
         let expected = crate::id::derive_ip(&endpoint_id);
-        assert_eq!(reply.answers()[0].data(), &RData::AAAA(expected.into()));
+        assert_eq!(reply.answers[0].data, RData::AAAA(expected.into()));
         assert_eq!(registry.get_endpoint_id(&expected), Some(endpoint_id));
     }
 
@@ -399,8 +398,8 @@ mod tests {
 
         let reply = resolver.resolve(&[0xab, 0xcd, 0xff]).await.unwrap();
         let reply = Message::from_vec(&reply).unwrap();
-        assert_eq!(reply.id(), 0xabcd);
-        assert_eq!(reply.response_code(), ResponseCode::FormErr);
+        assert_eq!(reply.metadata.id, 0xabcd);
+        assert_eq!(reply.metadata.response_code, ResponseCode::FormErr);
     }
 
     /// Fake upstream answering every query with a NOERROR response that
@@ -428,10 +427,10 @@ mod tests {
             .await
             .unwrap();
         let reply = Message::from_vec(&reply).unwrap();
-        assert_eq!(reply.id(), 0x4242);
-        assert_eq!(reply.response_code(), ResponseCode::NoError);
+        assert_eq!(reply.metadata.id, 0x4242);
+        assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
         assert!(
-            !reply.authoritative(),
+            !reply.metadata.authoritative,
             "came from the fake upstream, not from us"
         );
     }
@@ -447,8 +446,8 @@ mod tests {
             .await
             .unwrap();
         let reply = Message::from_vec(&reply).unwrap();
-        assert!(reply.authoritative());
-        assert_eq!(reply.answers().len(), 1);
+        assert!(reply.metadata.authoritative);
+        assert_eq!(reply.answers.len(), 1);
     }
 
     /// A second question must not smuggle a `.iron` name upstream: messages
@@ -457,8 +456,7 @@ mod tests {
     async fn test_resolve_rejects_multi_question() {
         let upstream = fake_upstream().await;
         let resolver = DnsResolver::new(Arc::new(Registry::new()), vec![upstream]);
-        let mut message = Message::new();
-        message.set_id(3);
+        let mut message = Message::new(3, MessageType::Query, OpCode::Query);
         message.add_query(Query::query(
             Name::from_str("example.com.").unwrap(),
             RecordType::A,
@@ -471,7 +469,7 @@ mod tests {
 
         let reply = resolver.resolve(&message.to_vec().unwrap()).await.unwrap();
         let reply = Message::from_vec(&reply).unwrap();
-        assert_eq!(reply.response_code(), ResponseCode::FormErr);
+        assert_eq!(reply.metadata.response_code, ResponseCode::FormErr);
     }
 
     #[tokio::test]
@@ -484,7 +482,7 @@ mod tests {
             .unwrap();
         let reply = Message::from_vec(&reply).unwrap();
         assert!(
-            reply.authoritative(),
+            reply.metadata.authoritative,
             "answered locally, not by the upstream"
         );
     }
@@ -513,12 +511,12 @@ mod tests {
 
         // Silent first server times out, second answers.
         let reply = Message::from_vec(&resolver.resolve(&query).await.unwrap()).unwrap();
-        assert_eq!(reply.response_code(), ResponseCode::NoError);
+        assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
 
         // Only the silent server: the client gets SERVFAIL instead of a timeout.
         resolver.upstream.as_mut().unwrap().servers = vec![silent_addr];
         let reply = Message::from_vec(&resolver.resolve(&query).await.unwrap()).unwrap();
-        assert_eq!(reply.response_code(), ResponseCode::ServFail);
+        assert_eq!(reply.metadata.response_code, ResponseCode::ServFail);
         drop(silent);
     }
 
@@ -543,7 +541,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let reply = Message::from_vec(&buf[..len]).unwrap();
-        assert_eq!(reply.id(), 77);
-        assert_eq!(reply.answers().len(), 1);
+        assert_eq!(reply.metadata.id, 77);
+        assert_eq!(reply.answers.len(), 1);
     }
 }

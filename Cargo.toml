@@ -18,8 +18,7 @@ etherparse = "0.19"
 futures = "0.3"
 figment = { version = "0.10", features = ["env", "toml"] }
 hex = "0.4"
-hickory-client = "0.25"
-hickory-proto = "0.25"
+hickory-proto = "0.26"
 iroh = "1.0.0-rc.0"
 iron-core = { path = "crates/iron-core" }
 iron-desktop = { path = "crates/iron-desktop" }

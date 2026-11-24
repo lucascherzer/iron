@@ -504,7 +504,7 @@ mod tests {
     /// router with a well-formed IPv6/UDP response, and never reaches iroh.
     #[tokio::test]
     async fn test_run_answers_dns_over_tun() {
-        use hickory_proto::op::{Message, Query};
+        use hickory_proto::op::{Message, MessageType, OpCode, Query};
         use hickory_proto::rr::{Name, RData, RecordType};
         use std::str::FromStr;
 
@@ -519,8 +519,7 @@ mod tests {
         // App at fd69:726f::1234 port 40000 asks the magic DNS server
         let peer = test_endpoint_id(11);
         let domain = format!("{}.", crate::id::to_domain(&peer));
-        let mut query = Message::new();
-        query.set_id(0x5151);
+        let mut query = Message::new(0x5151, MessageType::Query, OpCode::Query);
         query.add_query(Query::query(
             Name::from_str(&domain).unwrap(),
             RecordType::AAAA,
@@ -562,10 +561,10 @@ mod tests {
 
         // DNS payload answers with the peer's derived address
         let reply = Message::from_vec(udp.payload()).unwrap();
-        assert_eq!(reply.id(), 0x5151);
+        assert_eq!(reply.metadata.id, 0x5151);
         assert_eq!(
-            reply.answers()[0].data(),
-            &RData::AAAA(crate::id::derive_ip(&peer).into())
+            reply.answers[0].data,
+            RData::AAAA(crate::id::derive_ip(&peer).into())
         );
 
         assert!(

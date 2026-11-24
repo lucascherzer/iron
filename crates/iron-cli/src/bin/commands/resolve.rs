@@ -29,9 +29,8 @@ pub async fn run(
 
     // Build query
     let name = Name::from_utf8(&domain).context("Invalid domain name")?;
-    let mut query_msg = Message::new();
+    let mut query_msg = Message::query();
     query_msg.add_query(Query::query(name.clone(), RecordType::AAAA));
-    query_msg.set_recursion_desired(false);
 
     // Encode query
     let buf = query_msg.to_vec()?;
@@ -53,7 +52,7 @@ pub async fn run(
     let elapsed = start.elapsed();
 
     // Extract AAAA records
-    let answers = response.answers();
+    let answers = &response.answers;
     if answers.is_empty() {
         anyhow::bail!("No AAAA records found for {}", domain);
     }
@@ -62,7 +61,7 @@ pub async fn run(
     let ipv6 = answers
         .iter()
         .find_map(|record| {
-            if let hickory_proto::rr::RData::AAAA(addr) = record.data() {
+            if let hickory_proto::rr::RData::AAAA(addr) = &record.data {
                 Some(addr.to_string())
             } else {
                 None
@@ -70,7 +69,7 @@ pub async fn run(
         })
         .context("No IPv6 address in response")?;
 
-    let ttl = answers[0].ttl();
+    let ttl = answers[0].ttl;
 
     // Parse Node ID from domain (already validated to end with .iron)
     let base32_part = domain

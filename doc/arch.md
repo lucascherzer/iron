@@ -113,7 +113,7 @@ IPv6: fd69:726f:0000:0000:xxxx:xxxx:xxxx:xxxx
 # Third Party Software
 - iroh 0.95.1 (https://docs.rs/iroh/0.95.1/iroh/)
 - tun 0.8.5 (https://docs.rs/tun/0.8.5/tun)
-- hickory-proto 0.25 (DNS message parsing; the UDP server is a small tokio loop in `dns.rs`)
+- hickory-proto 0.26 (DNS message parsing; the UDP server is a small tokio loop in `dns.rs`)
 - tokio 1.x (async runtime with full features)
 - dashmap 6 (concurrent hash maps for Registry)
 - etherparse 0.19 (IPv6 packet parsing)
