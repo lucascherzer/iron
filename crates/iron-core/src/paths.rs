@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// Secret key file name inside the config directory.
 const KEY_FILE: &str = "secret.key";
 
-/// Known-peers cache file name inside the config directory.
+/// Application-state database file name inside the state directory.
 const STATE_FILE: &str = "state.db";
 
 /// Locations of iron's persistent state on disk.

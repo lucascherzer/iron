@@ -101,6 +101,29 @@ Analysis of serialization overhead and packet sizes for `iron/packet/1`.
 - [ ] Test QUIC behavior with >1500 byte packets
 - [ ] Document results and recommendations
 
+### 5. [`iron doctor`](./config-doctor.md) 📝
+**Status**: Proposal (not scheduled)
+**Priority**: Low (usability)
+**Dependencies**: None
+
+Read-only command that explains why `iron serve` would fail: per-layer
+configuration validation with the raw values each layer supplied, plus system
+checks (key/state permissions, DNS port, privileges).
+
+**Key points**:
+- Reuses `Sources` and `validate`; must never disagree with `iron serve`
+- Never writes to disk
+- Configuration section (~50 lines) can ship before the system checks
+
+### 6. [Android: Things to Consider](./android-considerations.md) 📝
+**Status**: Collection (running list)
+**Priority**: Low until the Android port starts
+**Dependencies**: [platform-abstraction.md](./platform-abstraction.md)
+
+Short notes from other changes on desktop-only assumptions and open
+questions for Android: config, DNS, storage, logging, lifecycle. Add a bullet
+whenever a change leaves something Android will need to handle.
+
 ## Proposal Relationships
 
 ```

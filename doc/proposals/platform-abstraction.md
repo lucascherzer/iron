@@ -30,9 +30,10 @@ The platform-independent engine now has four explicit boundaries:
   devices or run OS commands. The desktop implementation is
   `iron_desktop::DesktopTun`.
 - `StatePaths` supplies the persistent-state directory (the key file and
-  known-peers cache). The platform crate chooses it: desktop uses
-  `iron_desktop::default_state_paths()` (`$HOME/.config/iron`), Android will
-  supply the app data directory.
+  application-state database). The platform crate chooses it: desktop uses
+  `iron_desktop::default_state_paths()` (system-wide: `/var/lib/iron` on
+  Linux, `/Library/Application Support/iron` on macOS), Android will supply
+  the app data directory.
 - `DnsResolver::resolve` is message-level (bytes in, bytes out). It is driven
   by `serve_udp` (desktop loopback socket) and by `PacketRouter`, which
   answers queries sent over the TUN to `MAGIC_DNS_ADDR`.
@@ -70,7 +71,9 @@ or gate the check. The same rule is stated in `AGENTS.md` and in the
 
 ## Android Plan
 
-The following is future work, not part of the seam extraction.
+The following is future work, not part of the seam extraction. Smaller open
+points collected from other changes are in
+[android-considerations.md](./android-considerations.md).
 
 The Kotlin `VpnService` will use `VpnService.Builder` to provision the device:
 

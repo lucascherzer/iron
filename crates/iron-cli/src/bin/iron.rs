@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iron_core::IronNode;
-use iron_core::platform::PrivateFileWriter;
 use iron_desktop::dns_config;
 use std::net::SocketAddr;
 use tracing::{error, info, warn};
@@ -27,6 +26,10 @@ struct Cli {
     /// Skip loading any configuration file
     #[arg(long, global = true, conflicts_with = "config")]
     no_config: bool,
+
+    /// Ignore all IRON_* environment variables, including IRON_CONFIG
+    #[arg(long, global = true)]
+    no_env: bool,
 
     #[command(flatten)]
     settings: config::CliSettings,
@@ -129,12 +132,19 @@ enum Command {
         format: Option<String>,
     },
 
-    /// Import legacy state from a source directory
-    Migrate {
-        /// Legacy source directory
-        #[arg(long)]
-        from: std::path::PathBuf,
+    /// Inspect the resolved configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Print the effective configuration as TOML; active lines are set
+    /// explicitly, commented lines are defaults. Redirect the output of
+    /// `iron --no-config --no-env config show` to start a config file.
+    Show,
 }
 
 #[derive(Subcommand, Debug)]
@@ -206,17 +216,31 @@ async fn main() -> Result<()> {
         command => command,
     };
 
+    let default_config = iron_desktop::default_config_file();
     let selected_config = config::select_config(
         cli.no_config,
         cli.config.clone(),
-        std::env::var_os("IRON_CONFIG").map(std::path::PathBuf::from),
-        iron_desktop::default_config_file(),
+        std::env::var_os("IRON_CONFIG")
+            .filter(|_| !cli.no_env)
+            .map(std::path::PathBuf::from),
+        default_config.clone(),
     )?;
-    let settings = config::resolve(
+    let config_file =
+        config::describe_selection(cli.no_config, selected_config.as_deref(), &default_config);
+    let sources = config::Sources::load(
         selected_config.as_deref(),
-        config::environment(),
+        config::environment(!cli.no_env),
         cli.settings,
     )?;
+    if let Some(Command::Config {
+        command: ConfigCommand::Show,
+    }) = command
+    {
+        eprintln!("Config file: {config_file}");
+        print!("{}", config::show::render(&sources)?);
+        return Ok(());
+    }
+    let settings = sources.settings()?;
 
     // Initialize tracing subscriber (skip for some quiet commands)
     let skip_tracing = matches!(
@@ -233,7 +257,7 @@ async fn main() -> Result<()> {
 
     match command {
         Some(Command::Serve) => {
-            // Start daemon
+            info!("Configuration file: {config_file} (see `iron config show`)");
             start_daemon(settings).await?;
         }
         Some(Command::Self_ {
@@ -292,13 +316,8 @@ async fn main() -> Result<()> {
                 commands::key::reset(confirm, &settings.key_file)?;
             }
         },
-        Some(Command::Convert { .. } | Command::Resolve { .. }) => {
-            unreachable!("handled above, before configuration is loaded")
-        }
-        Some(Command::Migrate { from }) => {
-            warn!("`iron migrate` is deprecated and will be removed in a future release");
-            #[allow(deprecated)]
-            migrate(&from, &settings).await?;
+        Some(Command::Convert { .. } | Command::Resolve { .. } | Command::Config { .. }) => {
+            unreachable!("handled above")
         }
         None => {
             // No subcommand provided - show help
@@ -478,6 +497,44 @@ fn project_log_filter(level: &str) -> Result<tracing_subscriber::EnvFilter> {
     ))?)
 }
 
+/// Print startup banner with basic information
+fn print_banner(log_level: &str, dns_port: u16, dns_upstream: &[SocketAddr]) {
+    println!("┌─────────────────────────────────────────┐");
+    println!("│          iron - P2P Network             │");
+    println!("│   Peer-to-peer connectivity via iroh    │");
+    println!("└─────────────────────────────────────────┘");
+    println!();
+    println!("Configuration:");
+    println!("  Log level:  {}", log_level);
+    println!("  DNS port:   {}", dns_port);
+    println!("  Tunnel DNS: [{}]:53", iron_core::dns::MAGIC_DNS_ADDR);
+    if dns_upstream.is_empty() {
+        println!("  Upstream:   none (non-.iron queries refused)");
+    } else {
+        let upstream: Vec<String> = dns_upstream.iter().map(ToString::to_string).collect();
+        println!("  Upstream:   {}", upstream.join(", "));
+    }
+    println!();
+}
+
+/// Check if running with root privileges (required for TUN device creation)
+#[cfg(unix)]
+fn check_root() {
+    if !nix::unistd::Uid::effective().is_root() {
+        error!("ERROR: iron must be run as root (or with sudo)");
+        error!("Reason: Creating TUN network devices requires elevated privileges");
+        error!("");
+        error!("Please run with: sudo iron");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(unix))]
+fn check_root() {
+    // Windows/other platforms: just continue
+    // TUN device creation will fail with appropriate error message if privileges are insufficient
+}
+
 #[cfg(test)]
 mod logging_tests {
     use super::*;
@@ -517,199 +574,5 @@ mod logging_tests {
             assert!(output.contains(expected), "{output}");
         }
         assert!(!output.contains("filtered debug"), "{output}");
-    }
-}
-
-/// Print startup banner with basic information
-fn print_banner(log_level: &str, dns_port: u16, dns_upstream: &[SocketAddr]) {
-    println!("┌─────────────────────────────────────────┐");
-    println!("│          iron - P2P Network             │");
-    println!("│   Peer-to-peer connectivity via iroh    │");
-    println!("└─────────────────────────────────────────┘");
-    println!();
-    println!("Configuration:");
-    println!("  Log level:  {}", log_level);
-    println!("  DNS port:   {}", dns_port);
-    println!("  Tunnel DNS: [{}]:53", iron_core::dns::MAGIC_DNS_ADDR);
-    if dns_upstream.is_empty() {
-        println!("  Upstream:   none (non-.iron queries refused)");
-    } else {
-        let upstream: Vec<String> = dns_upstream.iter().map(ToString::to_string).collect();
-        println!("  Upstream:   {}", upstream.join(", "));
-    }
-    println!();
-}
-
-/// Check if running with root privileges (required for TUN device creation)
-#[cfg(unix)]
-fn check_root() {
-    if !nix::unistd::Uid::effective().is_root() {
-        error!("ERROR: iron must be run as root (or with sudo)");
-        error!("Reason: Creating TUN network devices requires elevated privileges");
-        error!("");
-        error!("Please run with: sudo iron");
-        std::process::exit(1);
-    }
-}
-
-#[cfg(not(unix))]
-fn check_root() {
-    // Windows/other platforms: just continue
-    // TUN device creation will fail with appropriate error message if privileges are insufficient
-}
-
-// TODO: Remove this migration function and its subcommand in the next release.
-#[deprecated(note = "remove after the next release")]
-async fn migrate(source: &std::path::Path, settings: &config::Settings) -> Result<()> {
-    let source_key = source.join("secret.key");
-    let key = iron_core::keys::load_key(&source_key)
-        .with_context(|| format!("invalid legacy key: {}", source_key.display()))?;
-    let destination_key = &settings.key_file;
-    let destination_state = &settings.state_file;
-    let source_peers = source.join("known_peers.json");
-    for destination in [destination_key, destination_state] {
-        match std::fs::symlink_metadata(destination) {
-            Ok(_) => anyhow::bail!("refusing migration: destination state already exists"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("checking migration destination"),
-        }
-    }
-    let key_bytes = key.to_bytes();
-    let peer_bytes = match std::fs::read(&source_peers) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("reading legacy known peers"),
-    };
-    let writer = iron_desktop::DesktopPrivateFileWriter;
-    let peer_bytes = peer_bytes.as_deref().unwrap_or(b"[]");
-    iron_core::AppState::decode_legacy_peers(peer_bytes).context("invalid legacy known peers")?;
-    // Prepare and checkpoint a complete database before publishing either
-    // destination. WAL/temporary files stay in the private staging directory.
-    let staging = tempfile::tempdir()?;
-    let staged_path = staging.path().join("state.db");
-    let staged_state = iron_core::AppState::open(&staged_path, &writer).await?;
-    staged_state.import_legacy_peers(peer_bytes).await?;
-    staged_state.checkpoint().await?;
-    drop(staged_state);
-    let state_bytes = std::fs::read(staged_path)?;
-    writer
-        .create_new(destination_key, &key_bytes)
-        .with_context(|| {
-            format!(
-                "failed to create destination key {}",
-                destination_key.display()
-            )
-        })?;
-    if let Err(error) = writer.create_new(destination_state, &state_bytes) {
-        std::fs::remove_file(destination_key)
-            .context("state migration failed and newly created key could not be removed")?;
-        return Err(error).context("failed to create destination database; removed new key");
-    }
-    info!("Legacy state migrated. Original files were left unchanged.");
-    Ok(())
-}
-
-#[cfg(test)]
-#[allow(deprecated)]
-mod migration_tests {
-    use super::*;
-    use iroh::SecretKey;
-
-    fn settings(key_file: std::path::PathBuf, state_file: std::path::PathBuf) -> config::Settings {
-        config::Settings {
-            key_file,
-            state_file,
-            ..Default::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn migration_copies_key_and_imports_peers_without_removing_sources() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("legacy");
-        std::fs::create_dir(&source).unwrap();
-        let key = SecretKey::generate().to_bytes();
-        std::fs::write(source.join("secret.key"), key).unwrap();
-        let peer = SecretKey::from_bytes(&key).public();
-        std::fs::write(
-            source.join("known_peers.json"),
-            serde_json::to_vec(&vec![iron_core::id::to_base32(&peer)]).unwrap(),
-        )
-        .unwrap();
-        let destination_key = dir.path().join("destination/secret.key");
-        let destination_state = dir.path().join("destination/state.db");
-        migrate(
-            &source,
-            &settings(destination_key.clone(), destination_state.clone()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(std::fs::read(destination_key).unwrap(), key);
-        let state =
-            iron_core::AppState::open(&destination_state, &iron_desktop::DesktopPrivateFileWriter)
-                .await
-                .unwrap();
-        assert_eq!(state.load_peers().await.unwrap(), vec![peer]);
-        assert!(source.join("secret.key").exists());
-        assert!(source.join("known_peers.json").exists());
-    }
-
-    #[tokio::test]
-    async fn migration_refuses_existing_destination_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("legacy");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::write(source.join("secret.key"), SecretKey::generate().to_bytes()).unwrap();
-        let destination_key = dir.path().join("state/secret.key");
-        let destination_state = dir.path().join("state/state.db");
-        std::fs::create_dir_all(destination_key.parent().unwrap()).unwrap();
-        std::fs::write(&destination_key, b"keep").unwrap();
-        assert!(
-            migrate(
-                &source,
-                &settings(destination_key.clone(), destination_state)
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(std::fs::read(destination_key).unwrap(), b"keep");
-    }
-
-    #[tokio::test]
-    async fn invalid_legacy_peers_do_not_publish_key_or_database() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("legacy");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::write(source.join("secret.key"), SecretKey::generate().to_bytes()).unwrap();
-        std::fs::write(source.join("known_peers.json"), b"not JSON").unwrap();
-        let key = dir.path().join("destination/key");
-        let database = dir.path().join("destination/state.db");
-        assert!(
-            migrate(&source, &settings(key.clone(), database.clone()))
-                .await
-                .is_err()
-        );
-        assert!(!key.exists());
-        assert!(!database.exists());
-        assert!(source.join("secret.key").exists());
-    }
-
-    #[tokio::test]
-    async fn missing_legacy_peers_creates_an_empty_database() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("legacy");
-        std::fs::create_dir(&source).unwrap();
-        let bytes = SecretKey::generate().to_bytes();
-        std::fs::write(source.join("secret.key"), bytes).unwrap();
-        let key = dir.path().join("destination/key");
-        let database = dir.path().join("destination/state.db");
-        migrate(&source, &settings(key.clone(), database.clone()))
-            .await
-            .unwrap();
-        assert_eq!(std::fs::read(key).unwrap(), bytes);
-        let state = iron_core::AppState::open(&database, &iron_desktop::DesktopPrivateFileWriter)
-            .await
-            .unwrap();
-        assert!(state.load_peers().await.unwrap().is_empty());
     }
 }

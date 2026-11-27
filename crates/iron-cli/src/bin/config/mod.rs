@@ -8,6 +8,8 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
+
+pub mod show;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -92,32 +94,67 @@ pub struct CliSettings {
     iroh: IrohArgs,
 }
 
+/// Nested arguments take their dotted config path as clap id, so
+/// `config show` can match every setting to its argument by path.
 #[derive(Args, Debug, Default, Serialize)]
 struct IrohArgs {
     /// Override pkarr publication and lookup server
-    #[arg(long, global = true)]
+    #[arg(
+        id = "iroh.pkarr_server",
+        long = "pkarr-server",
+        value_name = "URL",
+        global = true
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pkarr_server: Option<url::Url>,
     /// Use iroh's default relays (disable with --default-relays=false)
-    #[arg(long, global = true, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(
+        id = "iroh.default_relays",
+        long = "default-relays",
+        value_name = "BOOL",
+        global = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true"
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
     default_relays: Option<bool>,
     /// Custom relay URL (repeatable; replaces lower-layer list)
-    #[arg(long = "relay-server", global = true)]
+    #[arg(
+        id = "iroh.relay_servers",
+        long = "relay-server",
+        value_name = "URL",
+        global = true
+    )]
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_servers: Option<Vec<iroh::RelayUrl>>,
 }
 
+const ENV_PREFIX: &str = "IRON_";
+
 /// Read the real environment only at the application boundary. Individual
 /// names derive from field names; only the iroh namespace needs translation.
-pub fn environment() -> Env {
-    Env::prefixed("IRON_").ignore(&["CONFIG"]).map(|key| {
-        let key = key.as_str().to_ascii_lowercase();
-        key.strip_prefix("iroh_").map_or_else(
-            || key.clone().into(),
-            |field| format!("iroh.{field}").into(),
-        )
-    })
+/// Disabled (`--no-env`), the layer is present but empty.
+pub fn environment(enabled: bool) -> Env {
+    Env::prefixed(ENV_PREFIX)
+        .ignore(&["CONFIG"])
+        .filter(move |_| enabled)
+        .map(|key| env_key_to_path(key.as_str()).into())
+}
+
+/// `DNS_PORT` -> `dns_port`, `IROH_RELAY_SERVERS` -> `iroh.relay_servers`.
+fn env_key_to_path(key: &str) -> String {
+    let key = key.to_ascii_lowercase();
+    key.strip_prefix("iroh_")
+        .map_or_else(|| key.clone(), |field| format!("iroh.{field}"))
+}
+
+/// Inverse of [`env_key_to_path`], including the prefix.
+pub fn env_var_name(path: &str) -> String {
+    format!(
+        "{ENV_PREFIX}{}",
+        path.replace('.', "_").to_ascii_uppercase()
+    )
 }
 
 pub fn select_config(
@@ -137,28 +174,111 @@ pub fn select_config(
     match std::fs::metadata(&default_path) {
         Ok(_) => Ok(Some(default_path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).context("reading default configuration"),
+        Err(error) => {
+            let hint = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                " (run as root, or pass --no-config)"
+            } else {
+                ""
+            };
+            Err(error).with_context(|| {
+                format!(
+                    "reading default configuration {}{hint}",
+                    default_path.display()
+                )
+            })
+        }
     }
 }
 
-/// Layers are merged untyped and only the final result is checked, so a bad
-/// value in a lower layer is ignored if a higher layer overrides it.
-pub fn resolve(
-    config_file: Option<&Path>,
-    env: impl Provider,
-    cli: CliSettings,
-) -> Result<Settings> {
-    let mut sources = Figment::from(Serialized::defaults(Settings::default()));
-    if let Some(path) = config_file {
-        let contents = std::fs::read_to_string(path)
-            .with_context(|| format!("reading configuration {}", path.display()))?;
-        sources = sources.merge(Toml::string(&contents));
+/// Human-readable note on which configuration file was used, for
+/// `config show` and the daemon's startup log.
+pub fn describe_selection(no_config: bool, selected: Option<&Path>, default: &Path) -> String {
+    match selected {
+        Some(path) => path.display().to_string(),
+        None if no_config => "none (--no-config)".into(),
+        None => format!("none ({} not found, using defaults)", default.display()),
     }
-    let settings: Settings = sources
-        .merge(env)
-        .merge(Serialized::defaults(cli))
-        .extract()
-        .context("invalid configuration")?;
+}
+
+/// Which layer supplied a value. Later variants take precedence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Default,
+    File,
+    Env,
+    Cli,
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Default => "defaults",
+            Self::File => "config file",
+            Self::Env => "environment",
+            Self::Cli => "command-line flags",
+        })
+    }
+}
+
+/// The configuration layers, kept apart so `config show` can attribute each
+/// value to the layer it came from.
+pub struct Sources {
+    layers: Vec<(Origin, Figment)>,
+    /// Named in errors: the TOML is parsed from a string, so Figment's own
+    /// errors don't carry the path.
+    config_file: Option<PathBuf>,
+}
+
+impl Sources {
+    pub fn load(config_file: Option<&Path>, env: impl Provider, cli: CliSettings) -> Result<Self> {
+        let mut layers = vec![(
+            Origin::Default,
+            Figment::from(Serialized::defaults(Settings::default())),
+        )];
+        if let Some(path) = config_file {
+            let contents = std::fs::read_to_string(path)
+                .with_context(|| format!("reading configuration {}", path.display()))?;
+            layers.push((Origin::File, Figment::from(Toml::string(&contents))));
+        }
+        layers.push((Origin::Env, Figment::from(env)));
+        layers.push((Origin::Cli, Figment::from(Serialized::defaults(cli))));
+        Ok(Self {
+            layers,
+            config_file: config_file.map(Path::to_path_buf),
+        })
+    }
+
+    /// Strict: the configuration must be valid after every layer, so an
+    /// error always names the layer that broke it, even if a higher layer
+    /// would have overridden the bad value.
+    pub fn settings(&self) -> Result<Settings> {
+        let mut merged = Figment::new();
+        let mut settings = None;
+        for (origin, layer) in &self.layers {
+            merged = merged.merge(layer.clone());
+            let valid = validate(&merged).with_context(|| match (origin, &self.config_file) {
+                (Origin::File, Some(path)) => {
+                    format!("invalid configuration in {origin} {}", path.display())
+                }
+                _ => format!("invalid configuration in {origin}"),
+            })?;
+            settings = Some(valid);
+        }
+        settings.context("no configuration layers")
+    }
+
+    /// The highest layer that sets `key` (dotted path, e.g. `iroh.relay_servers`).
+    pub fn origin(&self, key: &str) -> Origin {
+        self.layers
+            .iter()
+            .rev()
+            .find(|(_, layer)| layer.find_value(key).is_ok())
+            .map_or(Origin::Default, |(origin, _)| *origin)
+    }
+}
+
+fn validate(merged: &Figment) -> Result<Settings> {
+    let settings: Settings = merged.extract()?;
     settings.iroh.relay_mode()?;
     if settings.key_file == settings.state_file {
         anyhow::bail!("key_file and state_file must be different files");
@@ -170,6 +290,14 @@ pub fn resolve(
 mod tests {
     use super::*;
     use serde_json::json;
+    fn resolve(
+        config_file: Option<&Path>,
+        env: impl Provider,
+        cli: CliSettings,
+    ) -> Result<Settings> {
+        Sources::load(config_file, env, cli)?.settings()
+    }
+
     fn empty_env() -> impl Provider {
         Serialized::defaults(json!({}))
     }
@@ -225,7 +353,7 @@ pkarr_server = "https://discovery.example.test"
     }
 
     #[test]
-    fn invalid_environment_values_are_rejected_unless_overridden() {
+    fn invalid_environment_values_are_rejected_even_if_overridden() {
         let cases = [
             (json!({"dns_port": 65536}), false),
             (json!({"dns_port": 65536}), true),
@@ -243,8 +371,13 @@ pkarr_server = "https://discovery.example.test"
                 dns_port: overridden.then_some(5333),
                 ..Default::default()
             };
-            let result = resolve(None, Serialized::defaults(&env), cli);
-            assert_eq!(result.is_ok(), overridden, "{env} overridden={overridden}");
+            let error = resolve(None, Serialized::defaults(&env), cli)
+                .expect_err(&format!("{env} overridden={overridden} should be rejected"));
+            assert_eq!(
+                error.to_string(),
+                "invalid configuration in environment",
+                "{env} should blame the environment"
+            );
         }
         for case in cases {
             run_test(case)
@@ -278,8 +411,10 @@ pkarr_server = "https://discovery.example.test"
     }
 
     #[test]
-    fn related_settings_can_be_completed_by_a_higher_layer() {
-        let settings = resolve(
+    fn every_layer_must_be_valid_on_its_own() {
+        // Disabling default relays in one layer and adding custom relays in
+        // a higher one is rejected: the lower layer alone leaves no relay.
+        let error = resolve(
             None,
             Serialized::defaults(json!({"iroh": {"default_relays": false}})),
             CliSettings {
@@ -289,6 +424,17 @@ pkarr_server = "https://discovery.example.test"
                 },
                 ..Default::default()
             },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "invalid configuration in environment");
+        // The same settings within one layer are fine.
+        let settings = resolve(
+            None,
+            Serialized::defaults(json!({"iroh": {
+                "default_relays": false,
+                "relay_servers": ["http://relay.example.test"],
+            }})),
+            CliSettings::default(),
         )
         .unwrap();
         assert!(!settings.iroh.default_relays);
@@ -340,5 +486,23 @@ pkarr_server = "https://discovery.example.test"
         assert!(select_config(false, Some(missing.clone()), None, missing.clone()).is_err());
         assert!(resolve(Some(&missing), empty_env(), CliSettings::default()).is_err());
         assert!(resolve(Some(dir.path()), empty_env(), CliSettings::default()).is_err());
+    }
+
+    #[test]
+    fn env_names_round_trip() {
+        let cases = [
+            ("dns_port", "IRON_DNS_PORT"),
+            ("state_file", "IRON_STATE_FILE"),
+            ("iroh.relay_servers", "IRON_IROH_RELAY_SERVERS"),
+        ];
+        fn run_test(case: (&str, &str)) {
+            let (path, var) = case;
+            assert_eq!(env_var_name(path), var, "naming {path}");
+            let key = var.strip_prefix(ENV_PREFIX).unwrap();
+            assert_eq!(env_key_to_path(key), path, "mapping {var}");
+        }
+        for case in cases {
+            run_test(case)
+        }
     }
 }

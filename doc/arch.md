@@ -234,8 +234,6 @@ persists learned peer EndpointIds; their IPv6 addresses are derived on load.
 transactional peer operations rather than SQL to the rest of the engine.
 
 Startup restores the registry from the database; shutdown saves a peer snapshot.
-The deprecated migration command imports legacy `known_peers.json` state
-without replacing existing destinations or modifying the original identity.
 See [Persistent application state](state.md) for storage boundaries, schema
 versioning, private-directory requirements, WAL handling, and verification limits.
 

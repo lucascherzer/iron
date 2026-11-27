@@ -116,7 +116,7 @@ and saves a secret key on first run. The default state paths are:
   `/Library/Application Support/iron/state.db`
 
 Use `--config PATH` to select a configuration file or `--no-config` to skip
-loading one. A missing implicit default config is fine; a missing file
+loading one (`--no-env` likewise ignores `IRON_*` variables). A missing implicit default config is fine; a missing file
 explicitly selected with `--config` is an error. Configuration is layered in
 this order: built-in/platform defaults, TOML, `IRON_*` environment variables,
 then CLI flags. See [Configuration](doc/cli.md#configuration) for all fields
@@ -132,18 +132,8 @@ private file. The database directory must also allow the engine's WAL files.
 Hostname aliases and configuration-to-state reconciliation are not implemented
 by this change.
 See [Persistent application state](doc/state.md) for the schema, lifecycle,
-migration, and database-directory requirements.
-
-Older installations may migrate state explicitly:
-
-```bash
-sudo iron migrate --from /path/to/old/iron-directory
-```
-
-Migration is deprecated and planned for removal in the next release. It is
-never performed automatically at startup, refuses to overwrite destination
-state, and leaves the original directory untouched. Run one managed iron node
-per machine; do not start multiple instances against the same state files.
+and database-directory requirements. Run one managed iron node per machine; do
+not start multiple instances against the same state files.
 
 Keep this key secure; it is your node's identity. Your domain name stays the
 same across restarts, so peers can always reach you at the same address.

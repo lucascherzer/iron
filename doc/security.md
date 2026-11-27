@@ -227,9 +227,8 @@ pub fn load_or_generate_key() -> Result<SecretKey> {
 - Don't share key file (only share EndpointId/base32)
 
 Run the managed daemon as a single service using the same configured state
-paths. Do not run concurrent managed instances against one key or known-peer
-file. Legacy state migration is explicit (`iron migrate --from OLD_DIR`), never
-runs at startup, refuses destination overwrite, and leaves the source intact.
+paths. Do not run concurrent managed instances against one key or state
+database.
 
 **Security benefit**: Keys remain owned by user, not root
 

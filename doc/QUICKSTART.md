@@ -57,16 +57,13 @@ To generate a pretty key:
 ## Key lifecycle
 Your private key is tied to your iron domain name. The defaults are
 `/var/lib/iron/secret.key` on Linux and
-`/Library/Application Support/iron/secret.key` on macOS. Configuration files
-and known-peer state are stored alongside platform state; see the
+`/Library/Application Support/iron/secret.key` on macOS, next to the
+application-state database (`state.db`); see the
 [configuration reference](cli.md#configuration) to override paths.
 You can manage keys with the `iron key` subcommand.
 
-Legacy state can be moved explicitly with `sudo iron migrate --from OLD_DIR`.
-Migration never runs automatically, refuses to overwrite destination state,
-and leaves the original directory intact. This compatibility command is
-deprecated and planned for removal in the next release. Run one managed iron
-node per machine; do not share state files between instances.
+Run one managed iron node per machine; do not share state files between
+instances.
 
-For Android, pass explicit app-private key and known-peer paths; the portable
+For Android, pass explicit app-private key and state-database paths; the portable
 core does not select Android filesystem locations.

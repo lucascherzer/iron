@@ -46,6 +46,8 @@ sudo iron serve [OPTIONS]
   explicitly selected file is an error.
 - `--no-config`: Skip configuration-file loading. This does not disable
   environment variables or command-line options.
+- `--no-env`: Ignore all `IRON_*` environment variables, including
+  `IRON_CONFIG`.
 - `--key-file <PATH>`: Select the persistent secret key file.
 - `--state-file <PATH>`: Select the local application-state database.
 - `--log-level <LEVEL>`: Set logging level
@@ -68,7 +70,25 @@ sudo iron serve [OPTIONS]
 Settings are applied in this order, with later sources overriding earlier
 ones: built-in/platform defaults, TOML, `IRON_*` environment, and CLI flags.
 An implicit default config file may be absent. `--config` explicitly selects a
-required file, while `--no-config` skips only TOML loading.
+required file, while `--no-config` skips only TOML loading and `--no-env` only
+the environment.
+
+Validation is strict: the configuration must be valid after each layer is
+applied, and an error names the layer that broke it. A bad value is rejected
+even if a higher layer would override it, and related settings must be
+completed within one layer (e.g. `default_relays = false` together with
+`relay_servers`).
+
+`iron config show` prints the effective configuration as TOML: values set by
+the file, environment or a flag are active lines annotated with their source
+and default; defaults are commented out. It is generated from the settings
+types, so it always lists every option. Which config file was read goes to
+stderr, so redirected output contains only the TOML. To start a config file without pinning
+any defaults, or values from your shell environment:
+
+```bash
+iron --no-config --no-env config show > config.toml
+```
 
 `convert`, `resolve` and `--cleanup-dns` don't use settings and never load
 configuration, so a broken config file or environment can't block them (notably
@@ -128,15 +148,6 @@ The database stores mutable application state; TOML remains configuration and
 the identity key remains a dedicated private file. Its directory must be private
 and writable for database and WAL files. See [Persistent application state](state.md)
 for the storage contract and backup considerations.
-
-### Explicit migration from legacy state
-
-Run `iron migrate --from OLD_DIR` to copy a legacy key and import optional
-`known_peers.json` into the currently configured state database. Migration
-validates the source key, refuses to overwrite any existing destination state,
-and leaves the source directory untouched. There is no automatic migration at
-startup. This compatibility command is deprecated and planned for removal in
-the next release.
 
 For self-hosted or offline networks, use the global `--pkarr-server`,
 `--default-relays=false`, and repeatable `--relay-server` settings documented

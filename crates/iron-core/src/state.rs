@@ -13,30 +13,6 @@ use turso::{Builder, Connection};
 
 const VERSION: i64 = 1;
 
-#[cfg(test)]
-mod checkpoint_tests;
-
-fn validate_checkpoint_status(status: (Option<i64>, Option<i64>, Option<i64>)) -> Result<()> {
-    match status {
-        (None, None, None) => Ok(()),
-        (Some(busy), Some(log_frames), Some(checkpointed_frames))
-            if busy == 0
-                && ((log_frames == -1 && checkpointed_frames == -1)
-                    || (log_frames >= 0
-                        && checkpointed_frames >= 0
-                        && checkpointed_frames >= log_frames)) =>
-        {
-            Ok(())
-        }
-        (Some(busy), Some(log_frames), Some(checkpointed_frames)) => {
-            bail!(
-                "incomplete WAL checkpoint (busy={busy}, log={log_frames}, checkpointed={checkpointed_frames})"
-            )
-        }
-        _ => bail!("incomplete WAL checkpoint returned a partially NULL status"),
-    }
-}
-
 /// Shared application-state store. One mutex owns the connection, so operations
 /// are serialized and dropped transactions are cleaned up before its next use.
 /// No database engine or connection escapes this domain API.
@@ -84,27 +60,6 @@ impl AppState {
         Ok(peers)
     }
 
-    /// Checkpoints committed WAL contents into the main database file.
-    ///
-    /// This is useful before an offline, create-only migration publishes the
-    /// database file elsewhere. All cloned stores must be dropped afterward.
-    pub async fn checkpoint(&self) -> Result<()> {
-        let conn = self.connection.lock().await;
-        let mut rows = conn
-            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
-            .await
-            .context("checkpointing state database")?;
-        let row = rows
-            .next()
-            .await?
-            .context("checkpoint returned no status")?;
-        let busy: Option<i64> = row.get(0)?;
-        let log_frames: Option<i64> = row.get(1)?;
-        let checkpointed_frames: Option<i64> = row.get(2)?;
-        validate_checkpoint_status((busy, log_frames, checkpointed_frames))
-            .context("checkpointing state database")
-    }
-
     /// Replaces the peer table with a snapshot atomically.
     pub async fn save_peers(&self, peers: impl IntoIterator<Item = EndpointId>) -> Result<()> {
         let mut conn = self.connection.lock().await;
@@ -121,48 +76,6 @@ impl AppState {
         }
         transaction.commit().await?;
         Ok(())
-    }
-
-    /// Imports the legacy JSON array only when the database peer table is empty.
-    /// Invalid IDs reject the complete import; nothing is partially committed.
-    pub async fn import_legacy_peers(&self, bytes: &[u8]) -> Result<usize> {
-        let peers = Self::decode_legacy_peers(bytes)?;
-        let mut conn = self.connection.lock().await;
-        let transaction = conn.transaction().await?;
-        let mut rows = transaction.query("SELECT count(*) FROM peers", ()).await?;
-        let count: i64 = rows.next().await?.context("missing peer count")?.get(0)?;
-        drop(rows);
-        if count != 0 {
-            bail!("refusing legacy import into nonempty state database");
-        }
-        for id in &peers {
-            transaction
-                .execute(
-                    "INSERT INTO peers(endpoint_id) VALUES (?1)",
-                    [id.as_bytes().to_vec()],
-                )
-                .await
-                .context("importing legacy peers")?;
-        }
-        transaction.commit().await?;
-        Ok(peers.len())
-    }
-
-    /// Strictly decodes the legacy JSON array of base32 EndpointIds.
-    /// Repeated valid IDs are ignored, preserving their first occurrence.
-    pub fn decode_legacy_peers(bytes: &[u8]) -> Result<Vec<EndpointId>> {
-        let strings: Vec<String> =
-            serde_json::from_slice(bytes).context("parsing legacy peers JSON")?;
-        let mut peers = strings
-            .iter()
-            .map(|value| {
-                crate::id::parse_base32(value)
-                    .with_context(|| format!("invalid EndpointId in legacy peers: {value}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut seen = std::collections::HashSet::new();
-        peers.retain(|id| seen.insert(*id));
-        Ok(peers)
     }
 }
 
@@ -300,7 +213,6 @@ mod tests {
         assert_eq!(state.load_peers().await.unwrap(), expected);
         assert!(state.save_peers([ids[0], ids[0]]).await.is_err());
         assert_eq!(state.load_peers().await.unwrap(), expected);
-        state.checkpoint().await.unwrap();
         drop(state);
         let reopened = AppState::open(&path, &TestPrivateFileWriter).await.unwrap();
         assert_eq!(reopened.load_peers().await.unwrap(), expected);
@@ -366,31 +278,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(state.load_peers().await.unwrap(), vec![next]);
-    }
-
-    #[tokio::test]
-    async fn imports_legacy_json_transactionally_and_refuses_clobber() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        let state = AppState::open(&path, &TestPrivateFileWriter).await.unwrap();
-        let first = test_endpoint_id(3);
-        let second = test_endpoint_id(4);
-        let legacy = serde_json::to_vec(&vec![
-            crate::id::to_base32(&first),
-            crate::id::to_base32(&first),
-            crate::id::to_base32(&second),
-            crate::id::to_base32(&second),
-        ])
-        .unwrap();
-        assert_eq!(
-            AppState::decode_legacy_peers(&legacy).unwrap(),
-            vec![first, second]
-        );
-        assert_eq!(state.import_legacy_peers(&legacy).await.unwrap(), 2);
-        assert!(state.import_legacy_peers(&legacy).await.is_err());
-        let mut expected = vec![first, second];
-        expected.sort_by_key(|id| id.as_bytes().to_vec());
-        assert_eq!(state.load_peers().await.unwrap(), expected);
     }
 
     #[tokio::test]
@@ -628,20 +515,5 @@ mod tests {
         drop(db);
         let state = AppState::open(&path, &TestPrivateFileWriter).await.unwrap();
         assert_eq!(state.load_peers().await.unwrap(), vec![peer]);
-    }
-
-    #[tokio::test]
-    async fn invalid_legacy_input_does_not_modify_state() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = AppState::open(&dir.path().join("state.db"), &TestPrivateFileWriter)
-            .await
-            .unwrap();
-        assert!(
-            state
-                .import_legacy_peers(br#"["not-an-endpoint"]"#)
-                .await
-                .is_err()
-        );
-        assert!(state.load_peers().await.unwrap().is_empty());
     }
 }

@@ -407,13 +407,11 @@ ping6 -i 0.2 fd69:726f::<peer> | tee latency.log
 - DNS caching
 - Connection pooling
 - Metrics and monitoring
-- Configuration file support
 
 ### Medium-term
 - Pipeline architecture for TUN
 - Multi-queue support (Linux)
 - IPv4 tunneling
-- Custom relay servers
 
 ### Long-term
 - Onion routing integration

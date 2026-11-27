@@ -91,16 +91,7 @@ checks of our small schema contract, not a proof of physical database integrity
 or every possible SQL constraint. For a future schema change, implement and
 test a versioned migration; do not merely increment the version constant.
 
-## Legacy migration and backups
-
-The deprecated `iron migrate --from OLD_DIR` command copies the legacy identity
-and imports the old `known_peers.json` array of base32 EndpointIds. Repeated
-valid IDs are deduplicated; invalid IDs reject the import.
-
-Migration validates sources, stages the database privately, and checkpoints
-committed WAL contents before publishing the complete database file. It refuses
-existing destinations and leaves originals intact. It is never called
-automatically on startup and is marked for removal in the next release.
+## Backups
 
 Do not copy a live main database file without accounting for its WAL. Stop the
 service before an ordinary filesystem backup and preserve any remaining engine
@@ -109,8 +100,8 @@ application-state handling.
 
 ## Verification scope
 
-Application tests cover persistence, transaction rollback, invalid state,
-legacy import, cancellation, and checkpoint/copy/reopen behavior. Linux Nix
+Application tests cover persistence, transaction rollback, invalid state and
+cancellation. Linux Nix
 checks exercise the production binary in isolated VM scenarios, and the
 Android core build checks portable dependencies.
 

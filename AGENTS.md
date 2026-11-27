@@ -2,14 +2,14 @@ See doc/arch.md for a general project description.
 
 # Coding Guidelines
 
-We do a lot of vibe coding here, so simplicity of code style, appropriate,
-in-place documentation with optional references to other docs are imperative in
-order to avoid documentation going out-of-date when developing new features.
+We do a lot of vibe coding here, so simplicity of code style, appropriate, in-place documentation with optional references to other docs are imperative in order to avoid documentation going out-of-date when developing new features.
 
-Check the doc/ directory when making changes to reflect them.
+Agents should strive for: clean, sensibly deduplicated, testable code by implementing unit- and integration tests.
 
-Agents should strive for: clean, sensibly deduplicated, testable code by
-implementing unit- and integration tests.
+Before you start work on a change, discuss the high-level details with the user.
+Check the doc/ directory, maybe the change you are working on has already been considered or is tangentially related to another change.
+In that case, bring it up to the user explicitly and make it clear which information comes from the doc, to ensure that information from stale docs is caught during the design phase.
+
 
 # Crate Layout (do not violate)
 
@@ -22,16 +22,11 @@ implementing unit- and integration tests.
   `iron_core::platform` (TUN provisioning, DNS system config).
 - `crates/iron-cli`: the `iron` binary.
 
-Need OS behavior in the core? Add a trait to `iron_core::platform`, implement it
-in the platform crate, inject it via `NodeConfig`. The `iron-core-android`
-check in `nix flake check` fails if iron-core stops building for Android;
-fix the layering, never weaken that check. Background:
-`doc/proposals/platform-abstraction.md`.
+Need OS behavior in the core? Add a trait to `iron_core::platform`, implement it in the platform crate, inject it via `NodeConfig`. The `iron-core-android` check in `nix flake check` fails if iron-core stops building for Android; fix the layering, never weaken that check. Background: `doc/proposals/platform-abstraction.md`.
 
 # Tests
 
-Simple tests that can be modeled as "this function should produce these outputs
-given these inputs" can and should be implemented following this pattern:
+Simple tests that can be modeled as "this function should produce these outputs given these inputs" can and should be implemented following this pattern:
 
 ```rs
 fn add(x: usize, y: usize) -> usize { x+y }
@@ -48,36 +43,6 @@ fn test_add() {
 
 # Code Style
 
-Agents with access to tools that allow them to execute a formatter should use
-them before submitting code for review.
+Agents with access to tools that allow them to execute a formatter should use them before submitting code for review.
 Use `nix flake check` to ensure the repo is in a good state.
 Nix may not be available in zsh, try `/nix/var/nix/profiles/default/bin/nix`.
-
-<!-- gortex:communities:start -->
-<!-- gortex:skills:start -->
-## Community Skills
-
-| Area | Description | Skill |
-|------|-------------|-------|
-| Src New | 38 symbols | `/gortex-src-new` |
-| Src Get Or Assign Ip | 30 symbols | `/gortex-src-get-or-assign-ip` |
-| Src 1 Dirs New | 30 symbols | `/gortex-src-1-dirs-new` |
-| Bin | 30 symbols | `/gortex-bin` |
-| Bin Commands 1 Dirs | 25 symbols | `/gortex-bin-commands-1-dirs` |
-| Bin Commands Detect And Convert | 24 symbols | `/gortex-bin-commands-detect-and-convert` |
-| Src Raw | 20 symbols | `/gortex-src-raw` |
-| Bin Commands Run Vanity | 19 symbols | `/gortex-bin-commands-run-vanity` |
-| Src 1 Dirs Platform | 14 symbols | `/gortex-src-1-dirs-platform` |
-| Src Run | 12 symbols | `/gortex-src-run` |
-| Src Tuninterface | 12 symbols | `/gortex-src-tuninterface` |
-| Src Handle Request | 11 symbols | `/gortex-src-handle-request` |
-| Src Len | 11 symbols | `/gortex-src-len` |
-| Bin Commands Generate | 9 symbols | `/gortex-bin-commands-generate` |
-| Src Handle Connection | 9 symbols | `/gortex-src-handle-connection` |
-| Src Get Or Connect | 8 symbols | `/gortex-src-get-or-connect` |
-| Bin Commands Run Resolve | 5 symbols | `/gortex-bin-commands-run-resolve` |
-| Bin Commands Info | 4 symbols | `/gortex-bin-commands-info` |
-| Bin Commands Load Key From File | 4 symbols | `/gortex-bin-commands-load-key-from-file` |
-<!-- gortex:skills:end -->
-
-<!-- gortex:communities:end -->

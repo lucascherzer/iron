@@ -10,7 +10,7 @@ use tracing::{debug, trace, warn};
 /// pure function, so the EndpointId → IPv6 direction needs no state at all.
 /// The registry only stores the reverse direction, which is what routing an
 /// outbound packet needs, and which is only known for peers seen before (via
-/// DNS, an incoming connection, or the known-peers cache). With a single map
+/// DNS, an incoming connection, or the application-state database). With a single map
 /// the two directions can never disagree.
 ///
 /// Addresses use only the last 64 bits of a key, so two keys *can* map to

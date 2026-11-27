@@ -151,38 +151,10 @@ fn no_config_skips_file_but_preserves_environment_and_read_only_behavior() {
 }
 
 #[test]
-fn migration_and_global_flags_work_through_real_binary() {
+fn global_flags_work_after_the_subcommand() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("legacy");
-    fs::create_dir(&source).unwrap();
-    let id = write_identity(&source.join("secret.key"), 4);
-    let peer = iroh::SecretKey::from_bytes(&[9; 32]).public();
-    fs::write(
-        source.join("known_peers.json"),
-        serde_json::to_vec(&vec![
-            iron_core::id::to_base32(&peer),
-            iron_core::id::to_base32(&peer),
-        ])
-        .unwrap(),
-    )
-    .unwrap();
-    let key = dir.path().join("state/key");
-    let peers = dir.path().join("state/peers");
-    let run_migration = || {
-        command()
-            .args(["--no-config", "--key-file"])
-            .arg(&key)
-            .arg("--state-file")
-            .arg(&peers)
-            .args(["migrate", "--from"])
-            .arg(&source)
-            .output()
-            .unwrap()
-    };
-    succeeds(run_migration());
-    assert!(!run_migration().status.success());
-    assert!(source.join("secret.key").exists());
-    assert!(fs::read(&peers).unwrap().starts_with(b"SQLite format 3"));
+    let key = dir.path().join("identity.key");
+    let id = write_identity(&key, 4);
     let output = succeeds(
         command()
             .args(["self", "--no-config", "--key-file"])
@@ -280,4 +252,84 @@ fn commands_without_settings_ignore_broken_configuration() {
             .status
             .success()
     );
+}
+
+#[test]
+fn config_show_attributes_values_to_their_source() {
+    // `command()` sets IRON_LOG_LEVEL=error.
+    let output = command()
+        .args(["--no-config", "--dns-port", "6000", "config", "show"])
+        .output()
+        .unwrap();
+    // Run details go to stderr, so `config show > config.toml` excludes them.
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(stderr, "Config file: none (--no-config)\n");
+    let out = succeeds(output);
+    let cases = [
+        "# Active lines are set explicitly; commented lines are defaults.\n",
+        "\ndns_port = 6000  # from flag --dns-port (default: 5333)\n",
+        "\nlog_level = \"error\"  # from env IRON_LOG_LEVEL (default: \"info\")\n",
+        "\n# default_relays = true\n",
+    ];
+    for expected in cases {
+        assert!(out.contains(expected), "expected {expected:?} in:\n{out}");
+    }
+}
+
+#[test]
+fn no_env_ignores_iron_variables() {
+    // `command()` sets IRON_LOG_LEVEL; the invalid port would otherwise fail.
+    let out = succeeds(
+        command()
+            .env("IRON_DNS_PORT", "not-a-port")
+            .args(["--no-config", "--no-env", "config", "show"])
+            .output()
+            .unwrap(),
+    );
+    for expected in ["\n# log_level = \"info\"\n", "\n# dns_port = 5333\n"] {
+        assert!(out.contains(expected), "expected {expected:?} in:\n{out}");
+    }
+}
+
+#[test]
+fn invalid_values_name_their_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("broken.toml");
+    fs::write(&config, "dns_port = -1\n").unwrap();
+    let config_flag = format!("--config={}", config.display());
+    let file_layer = format!("invalid configuration in config file {}", config.display());
+    // (env var, config flag, expected stderr fragments)
+    let cases = [
+        (
+            Some(("IRON_DNS_PORT", "not-a-port")),
+            "--no-config",
+            vec![
+                "invalid configuration in environment",
+                "\"DNS_PORT\" in `IRON_`",
+            ],
+        ),
+        (
+            None,
+            config_flag.as_str(),
+            vec![file_layer.as_str(), "dns_port"],
+        ),
+    ];
+    for (env, config_arg, expected) in cases {
+        let mut command = command();
+        if let Some((key, value)) = env {
+            command.env(key, value);
+        }
+        let output = command
+            .args([config_arg, "--dns-port", "6000", "config", "show"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for fragment in expected {
+            assert!(
+                stderr.contains(fragment),
+                "expected {fragment:?} in:\n{stderr}"
+            );
+        }
+    }
 }

@@ -21,7 +21,7 @@ use tracing::info;
 /// `iron_desktop::desktop_node_config`, while other platforms construct the
 /// fields explicitly.
 pub struct NodeConfig {
-    /// Where persistent state (secret key, known-peers cache) lives.
+    /// Where persistent state (secret key, application-state database) lives.
     pub paths: StatePaths,
     /// Secure create-only storage implementation for private key material.
     pub storage: Arc<dyn PrivateFileWriter>,
